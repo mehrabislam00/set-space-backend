@@ -24,6 +24,7 @@ const client = new MongoClient(
 );
 
 
+
 // Function to connect to MongoDB
 export async function connectToMongoDB() {
   try {
@@ -38,6 +39,27 @@ export async function connectToMongoDB() {
 
 // Connect to MongoDB and get the destinations collection
 const ConnectedClient = await connectToMongoDB();
+const db = ConnectedClient.db("set-space-db");
+const authDb = ConnectedClient.db("auth");
+const authUsersCollection = authDb.collection("user");
+const authUserSessionsCollection = authDb.collection("session");
+const authAccountsCollection = authDb.collection("account");
+const authUserVerificationsCollection = authDb.collection("verification");
+const userProfilesCollection = db.collection("userProfiles");
+const studiosCollection = db.collection("studios");
+const bookingsCollection = db.collection("bookings");
+const reviewsCollection = db.collection("reviews");
+const wishlistsCollection = db.collection("wishlists");
+const notificationsCollection = db.collection("notifications");
+
+
+
+
+
+
+
+
+
 
 
 
