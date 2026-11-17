@@ -304,8 +304,36 @@ async function ensureApplicationIndexes() {
   ]);
 }
 
+const STALE_INDEXES = {
+  studios: ['slug_1', 'category_1', 'city_1'],
+  reviews: ['bookingId_1'],
+  wishlists: ['userId_1_studioId_1'],
+  bookings: ['hostId_1', 'renterId_1', 'studioId_1'],
+};
+
+/**
+ * Earlier experiments left indexes for a different document shape: a required
+ * slug on every studio, hostId instead of ownerId, and one wishlist row per
+ * studio. The collections are application-owned and these names are not part
+ * of the current index set, so they are removed before the real indexes are
+ * ensured. Auth indexes are never touched.
+ */
+async function retireStaleIndexes() {
+  for (const [name, indexNames] of Object.entries(STALE_INDEXES)) {
+    const collection = setSpaceDb.collection(name);
+    const existing = new Set(
+      (await collection.indexes()).map((index) => index.name)
+    );
+
+    for (const indexName of indexNames) {
+      if (!existing.has(indexName)) continue;
+      await collection.dropIndex(indexName);
+      console.log(`Dropped stale index ${name}.${indexName}`);
+    }
+  }
+}
+
 let databaseReady = false;
-let databaseSetupError = null;
 
 async function setupDatabases() {
   const [authPing, setSpacePing] = await Promise.all([
@@ -318,6 +346,7 @@ async function setupDatabases() {
   }
 
   await ensureApplicationCollections();
+  await retireStaleIndexes();
   await ensureApplicationIndexes();
   databaseReady = true;
 
@@ -341,8 +370,10 @@ async function setupDatabases() {
 try {
   await setupDatabases();
 } catch (error) {
-  databaseSetupError = error?.message || 'Database setup failed';
-  console.error('Database foundation setup failed:', databaseSetupError);
+  console.error(
+    'Database foundation setup failed:',
+    error?.message || 'Database setup failed'
+  );
 }
 
 /* ------------------------------------------------------------------ */
