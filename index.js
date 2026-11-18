@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { MongoClient, ObjectId } from 'mongodb';
+import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 
 const app = express();
 const port = Number(process.env.PORT) || 5000;
@@ -25,6 +26,44 @@ const AUTH_DB_NAME = process.env.AUTH_DB_NAME?.trim() || 'auth';
 const SETSPACE_DB_NAME = process.env.SETSPACE_DB_NAME?.trim() || 'SetSpace';
 const USER_PROFILES_COLLECTION = 'userProfiles';
 const PROFILE_BIO_MAX = 280;
+const PROFILE_IMAGE_MAX_BYTES = 1_048_576;
+const CONTACT_NAME_MAX_LENGTH = 100;
+const CONTACT_EMAIL_MAX_LENGTH = 254;
+const CONTACT_TOPIC_MAX_LENGTH = 120;
+const CONTACT_MESSAGE_MAX_LENGTH = 5000;
+const PROFILE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml']);
+const STUDIO_PHOTO_MAX_BYTES = PROFILE_IMAGE_MAX_BYTES;
+const STUDIO_PHOTO_MAX_COUNT = 8;
+const STUDIO_PHOTO_TYPES = PROFILE_IMAGE_TYPES;
+const MAX_STUDIO_PHOTO_DATA_URL_LENGTH = Math.ceil(STUDIO_PHOTO_MAX_BYTES / 3) * 4 + 128;
+const BOOKING_SERVICE_FEE_RATE = 0.08;
+const REVIEW_COMMENT_MAX_LENGTH = 2000;
+const BOOKING_OVERLAP_STATUSES = ['Pending', 'Confirmed'];
+const BOOKING_STATUSES = new Set(['Pending', 'Confirmed', 'Rejected', 'Completed', 'Cancelled']);
+const STUDIO_CATEGORIES = new Set([
+  'Photo Studios',
+  'Music Studios',
+  'Podcast Studios',
+  'Film Studios',
+  'Content Creation Studios',
+  'Art Studios',
+]);
+const STUDIO_CATEGORY_LABELS = {
+  'Photo Studios': 'Photo Studio',
+  'Music Studios': 'Music Suite',
+  'Podcast Studios': 'Podcast Room',
+  'Film Studios': 'Film Stage',
+  'Content Creation Studios': 'Content Studio',
+  'Art Studios': 'Art Workshop',
+};
+const STUDIO_CATEGORY_DISCIPLINES = {
+  'Photo Studios': 'Photo Studios',
+  'Music Studios': 'Music Suites',
+  'Podcast Studios': 'Podcast Rooms',
+  'Film Studios': 'Film Stages',
+  'Content Creation Studios': 'Content Studios',
+  'Art Studios': 'Art Workshops',
+};
 
 /**
  * The browser never talks to this API with a user id. Every profile request
@@ -64,9 +103,7 @@ function getOrigin(url) {
 // frontend origin that Better Auth itself is configured with.
 const AUTH_ORIGIN = getOrigin(AUTH_BASE_URL);
 
-const allowedOrigins = (
-  process.env.CLIENT_URI || 'http://localhost:3000,http://127.0.0.1:3000'
-)
+const allowedOrigins = (process.env.CLIENT_URI || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim().replace(/\/+$/, ''))
   .filter(Boolean);
@@ -89,9 +126,9 @@ app.use(
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    allowedHeaders: ['Content-Type', 'Accept'],
     optionsSuccessStatus: 204,
-  })
+  }),
 );
 
 // CORS only controls browser response headers. Reject a disallowed Origin
@@ -108,7 +145,66 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '100kb' }));
+app.use(
+  express.json({
+    limit: '100kb',
+    type: (req) =>
+      !req.path.startsWith('/api/studios') &&
+      req.path !== '/api/profile/image',
+  }),
+);
+
+const parseStudioJsonBody = express.json({ limit: '12mb' });
+
+function handleStudioJsonBody(req, res, next) {
+  parseStudioJsonBody(req, res, (error) => {
+    if (!error) return next();
+
+    if (error.type === 'entity.too.large') {
+      return sendError(res, 413, 'Studio listing data exceeds the size limit');
+    }
+
+    if (error.type === 'entity.parse.failed') {
+      return sendError(res, 400, 'Could not read the studio listing');
+    }
+
+    return next(error);
+  });
+}
+
+const parseProfileImageBody = express.raw({
+  type: () => true,
+  limit: PROFILE_IMAGE_MAX_BYTES,
+});
+
+function handleProfileImageBody(req, res, next) {
+  parseProfileImageBody(req, res, (error) => {
+    if (!error) return next();
+
+    if (error.type === 'entity.too.large') {
+      return res.status(413).json({
+        error: 'Profile image must be 1 MB or smaller',
+        code: 'PROFILE_IMAGE_TOO_LARGE',
+      });
+    }
+
+    if (error.type === 'encoding.unsupported') {
+      return res.status(415).json({
+        error: 'Unsupported profile image encoding',
+        code: 'UNSUPPORTED_PROFILE_IMAGE_ENCODING',
+      });
+    }
+
+    if (error.type === 'entity.parse.failed') {
+      return res.status(400).json({
+        error: 'Could not read the uploaded profile image',
+        code: 'INVALID_PROFILE_IMAGE_BODY',
+      });
+    }
+
+    return next(error);
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* 3. MongoDB connection                                               */
@@ -164,25 +260,48 @@ const newsletterSubscribers = setSpaceDb.collection('newsletterSubscribers');
 // Better Auth data (auth database). Read-only here: Better Auth owns it.
 const authUsers = authDb.collection('user');
 
-const db = {
-  client: ConnectedClient,
-  auth: authDb,
-  setSpace: setSpaceDb,
-  userProfiles,
-  studios,
-  bookings,
-  reviews,
-  wishlists,
-  notifications,
-  contactMessages,
-  newsletterSubscribers,
-  authUsers,
-};
-
 /** True only for a 24-character hex ObjectId string. */
 function isValidObjectId(value) {
   if (typeof value !== 'string' || !ObjectId.isValid(value)) return false;
   return String(new ObjectId(value)) === value;
+}
+
+function normalizeEmail(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  return (
+    typeof value === 'string' &&
+    value.length <= CONTACT_EMAIL_MAX_LENGTH &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+  );
+}
+
+function normalizeContactPhone(value) {
+  if (typeof value !== 'string') return null;
+
+  const phone = value.trim().replace(/[\s().-]/g, '');
+  if (!/^\+?\d+$/.test(phone)) return null;
+
+  const digits = phone.startsWith('+') ? phone.slice(1) : phone;
+  if (/^01[3-9]\d{8}$/.test(digits)) {
+    return `+880${digits.slice(1)}`;
+  }
+  if (/^0[2-9]\d{7,9}$/.test(digits)) {
+    return `+880${digits.slice(1)}`;
+  }
+  if (/^8801[3-9]\d{8}$/.test(digits)) {
+    return `+${digits}`;
+  }
+  if (/^880\d{8,10}$/.test(digits)) {
+    return `+${digits}`;
+  }
+  if (phone.startsWith('+') && /^[1-9]\d{6,14}$/.test(digits)) {
+    return `+${digits}`;
+  }
+  return null;
 }
 
 function sendSuccess(res, { status = 200, message, data } = {}) {
@@ -196,6 +315,116 @@ function sendError(res, status, message) {
   return res.status(status).json({ success: false, message });
 }
 
+function withApiErrorHandling(handler, message, { logMessage, onError } = {}) {
+  return (req, res) =>
+    handler(req, res).catch((error) => {
+      if (onError) return onError(error, req, res);
+      console.error(logMessage || `${message}:`, error);
+      return sendError(res, 500, message);
+    });
+}
+
+function withStudioErrorHandling(handler, message) {
+  return withApiErrorHandling(handler, message, {
+    onError(error, _req, res) {
+      if (error?.status === 400) {
+        return sendError(res, 400, error.message);
+      }
+
+      console.error(`${message}:`, error);
+      return sendError(res, 500, message);
+    },
+  });
+}
+
+function withBookingErrorHandling(handler, message, duplicateMessage) {
+  return withApiErrorHandling(handler, message, {
+    onError(error, _req, res) {
+      if (error?.status) {
+        return sendError(res, error.status, error.message);
+      }
+      if (duplicateMessage && error?.code === 11000) {
+        return sendError(res, 409, duplicateMessage);
+      }
+
+      console.error(`${message}:`, error);
+      return sendError(res, 500, message);
+    },
+  });
+}
+
+function findProfile(userId) {
+  return userProfiles.findOne({ userId }, { projection: { imageData: 0 } });
+}
+
+async function getHostOnboardingState(userId) {
+  const [
+    profile,
+    hostedStudioCount,
+    publishedStudioCount,
+    bookingCount,
+    resolvedBookingCount,
+    updatedStudioCount,
+  ] = await Promise.all([
+    findProfile(userId),
+    studios.countDocuments({ ownerId: userId }),
+    studios.countDocuments({
+      ownerId: userId,
+      status: { $in: ['active', 'published'] },
+    }),
+    bookings.countDocuments({ ownerId: userId }),
+    bookings.countDocuments({
+      ownerId: userId,
+      status: { $in: ['Confirmed', 'Rejected', 'Completed'] },
+    }),
+    studios.countDocuments({
+      ownerId: userId,
+      $expr: { $gt: ['$updatedAt', '$createdAt'] },
+    }),
+  ]);
+  const name =
+    typeof profile?.name === 'string'
+      ? profile.name.trim().replace(/\s+/g, ' ')
+      : '';
+  const profileComplete = name.length > 0 && name.length <= PROFILE_LIMITS.name;
+  const completedSteps = [1];
+  if (profileComplete) completedSteps.push(2);
+  if (profileComplete && hostedStudioCount > 0) completedSteps.push(3);
+  if (hostedStudioCount > 0 && publishedStudioCount > 0) completedSteps.push(4);
+  if (publishedStudioCount > 0 && bookingCount > 0) completedSteps.push(5);
+  if (bookingCount > 0 && resolvedBookingCount > 0) completedSteps.push(6);
+  if (hostedStudioCount > 0 && updatedStudioCount > 0) completedSteps.push(7);
+  if (hostedStudioCount > 0) completedSteps.push(8);
+  const savedStep = profile?.hostOnboardingStep;
+  const currentStep =
+    Number.isInteger(savedStep) && savedStep >= 0 && savedStep < 8
+      ? savedStep
+      : 0;
+
+  return {
+    onboardingCompleted: profile?.hostOnboardingCompleted === true,
+    hasHostedStudio: hostedStudioCount > 0,
+    profileComplete,
+    missingFields: profileComplete ? [] : ['name'],
+    currentStep,
+    completedSteps,
+  };
+}
+
+function sendProfileError(res, status, message, code, details = {}) {
+  return res.status(status).json({ error: message, ...details, code });
+}
+
+function logProfileError(res, error, logMessage, message, code) {
+  console.error(logMessage, error);
+  return sendProfileError(res, 500, message, code);
+}
+
+function withProfileErrorHandling(handler, logMessage, message, code) {
+  return (req, res) =>
+    handler(req, res).catch((error) => logProfileError(res, error, logMessage, message, code));
+}
+
 /**
  * Create a collection only when it is missing. Existing documents, including
  * userProfiles written by the profile API, are left in place.
@@ -203,8 +432,8 @@ function sendError(res, status, message) {
 async function ensureApplicationCollections() {
   const existing = new Set(
     (await setSpaceDb.listCollections({}, { nameOnly: true }).toArray()).map(
-      (collection) => collection.name
-    )
+      (collection) => collection.name,
+    ),
   );
 
   for (const name of APPLICATION_COLLECTIONS) {
@@ -226,7 +455,7 @@ async function createIndex(collection, keys, options) {
     if (error?.code === 85 || error?.code === 86) {
       console.warn(
         `Index already present on ${collection.collectionName}:`,
-        options?.name || JSON.stringify(keys)
+        options?.name || JSON.stringify(keys),
       );
       return;
     }
@@ -236,72 +465,41 @@ async function createIndex(collection, keys, options) {
 }
 
 async function ensureApplicationIndexes() {
-  await Promise.all([
-    createIndex(userProfiles, { userId: 1 }, { unique: true, name: 'userId_unique' }),
-
-    createIndex(
+  const indexes = [
+    [userProfiles, { userId: 1 }, { unique: true, name: 'userId_unique' }],
+    [
       studios,
       { slug: 1 },
-      {
-        unique: true,
-        name: 'slug_unique',
-        partialFilterExpression: { slug: { $gt: '' } },
-      }
-    ),
-    createIndex(studios, { ownerId: 1 }, { name: 'ownerId' }),
-    createIndex(studios, { status: 1 }, { name: 'status' }),
-    createIndex(
-      studios,
-      { status: 1, featured: 1, createdAt: -1 },
-      { name: 'status_featured_createdAt' }
-    ),
-
-    createIndex(bookings, { renterId: 1, createdAt: -1 }, { name: 'renterId_createdAt' }),
-    createIndex(bookings, { ownerId: 1, createdAt: -1 }, { name: 'ownerId_createdAt' }),
-    createIndex(
-      bookings,
-      { studioId: 1, bookingDate: 1, status: 1 },
-      { name: 'studioId_bookingDate_status' }
-    ),
-
-    createIndex(reviews, { studioId: 1, createdAt: -1 }, { name: 'studioId_createdAt' }),
-    createIndex(reviews, { userId: 1, createdAt: -1 }, { name: 'userId_createdAt' }),
-    createIndex(
+      { unique: true, name: 'slug_unique', partialFilterExpression: { slug: { $gt: '' } } },
+    ],
+    [studios, { ownerId: 1 }, { name: 'ownerId' }],
+    [studios, { status: 1 }, { name: 'status' }],
+    [studios, { status: 1, featured: 1, createdAt: -1 }, { name: 'status_featured_createdAt' }],
+    [bookings, { renterId: 1, createdAt: -1 }, { name: 'renterId_createdAt' }],
+    [bookings, { ownerId: 1, createdAt: -1 }, { name: 'ownerId_createdAt' }],
+    [bookings, { studioId: 1, bookingDate: 1, status: 1 }, { name: 'studioId_bookingDate_status' }],
+    [reviews, { studioId: 1, createdAt: -1 }, { name: 'studioId_createdAt' }],
+    [reviews, { userId: 1, createdAt: -1 }, { name: 'userId_createdAt' }],
+    [
       reviews,
       { bookingId: 1 },
       {
         unique: true,
         name: 'bookingId_unique',
         partialFilterExpression: { bookingId: { $gt: '' } },
-      }
-    ),
+      },
+    ],
+    [wishlists, { userId: 1 }, { unique: true, name: 'userId_unique' }],
+    [notifications, { userId: 1, createdAt: -1 }, { name: 'userId_createdAt' }],
+    [notifications, { userId: 1, isRead: 1, createdAt: -1 }, { name: 'userId_isRead_createdAt' }],
+    [contactMessages, { createdAt: -1 }, { name: 'createdAt' }],
+    [contactMessages, { status: 1, createdAt: -1 }, { name: 'status_createdAt' }],
+    [newsletterSubscribers, { email: 1 }, { unique: true, name: 'email_unique' }],
+  ];
 
-    createIndex(wishlists, { userId: 1 }, { unique: true, name: 'userId_unique' }),
-
-    createIndex(
-      notifications,
-      { userId: 1, createdAt: -1 },
-      { name: 'userId_createdAt' }
-    ),
-    createIndex(
-      notifications,
-      { userId: 1, isRead: 1, createdAt: -1 },
-      { name: 'userId_isRead_createdAt' }
-    ),
-
-    createIndex(contactMessages, { createdAt: -1 }, { name: 'createdAt' }),
-    createIndex(
-      contactMessages,
-      { status: 1, createdAt: -1 },
-      { name: 'status_createdAt' }
-    ),
-
-    createIndex(
-      newsletterSubscribers,
-      { email: 1 },
-      { unique: true, name: 'email_unique' }
-    ),
-  ]);
+  await Promise.all(
+    indexes.map(([collection, keys, options]) => createIndex(collection, keys, options)),
+  );
 }
 
 const STALE_INDEXES = {
@@ -321,9 +519,7 @@ const STALE_INDEXES = {
 async function retireStaleIndexes() {
   for (const [name, indexNames] of Object.entries(STALE_INDEXES)) {
     const collection = setSpaceDb.collection(name);
-    const existing = new Set(
-      (await collection.indexes()).map((index) => index.name)
-    );
+    const existing = new Set((await collection.indexes()).map((index) => index.name));
 
     for (const indexName of indexNames) {
       if (!existing.has(indexName)) continue;
@@ -358,22 +554,19 @@ async function setupDatabases() {
   console.log(
     `Auth database "${AUTH_DB_NAME}" is reachable. Collections: ${
       authNames.map((collection) => collection.name).join(', ') || '(none yet)'
-    }`
+    }`,
   );
   console.log(
     `SetSpace database "${SETSPACE_DB_NAME}" is reachable. Collections: ${setSpaceNames
       .map((collection) => collection.name)
-      .join(', ')}`
+      .join(', ')}`,
   );
 }
 
 try {
   await setupDatabases();
 } catch (error) {
-  console.error(
-    'Database foundation setup failed:',
-    error?.message || 'Database setup failed'
-  );
+  console.error('Database foundation setup failed:', error?.message || 'Database setup failed');
 }
 
 /* ------------------------------------------------------------------ */
@@ -386,9 +579,7 @@ try {
  * instead of maintaining a second copy of the auth setup in this service.
  */
 async function getBetterAuthSession(req) {
-  if (!req.headers.cookie && !req.headers.authorization) {
-    return null;
-  }
+  if (!req.headers.cookie) return null;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -399,10 +590,7 @@ async function getBetterAuthSession(req) {
       origin: AUTH_ORIGIN,
     };
 
-    if (req.headers.cookie) headers.cookie = req.headers.cookie;
-    if (req.headers.authorization) {
-      headers.authorization = req.headers.authorization;
-    }
+    headers.cookie = req.headers.cookie;
 
     const response = await fetch(SESSION_ENDPOINT, {
       method: 'GET',
@@ -411,9 +599,7 @@ async function getBetterAuthSession(req) {
     });
 
     if (!response.ok) {
-      throw new Error(
-        `Better Auth session endpoint returned ${response.status}`
-      );
+      throw new Error(`Better Auth session endpoint returned ${response.status}`);
     }
 
     const data = await response.json().catch(() => null);
@@ -440,7 +626,6 @@ async function requireSession(req, res, next) {
       });
     }
 
-    req.auth = session;
     req.authUser = session.user;
     req.userId = String(session.user.id);
 
@@ -494,6 +679,13 @@ function serializeUser(user) {
 function serializeProfile(profile, authUser) {
   if (!profile) return null;
 
+  const imageVersion = profile.imageUpdatedAt ? new Date(profile.imageUpdatedAt).getTime() : 0;
+  const imageCacheKey = profile.imageVersion || imageVersion;
+  const image =
+    profile.image === '/api/profile/image' && PROFILE_IMAGE_TYPES.has(profile.imageContentType)
+      ? `${profile.image}?v=${imageCacheKey}`
+      : (profile.image ?? authUser?.image ?? null);
+
   return {
     id: profile._id ? String(profile._id) : String(profile.userId),
     userId: String(profile.userId),
@@ -502,7 +694,7 @@ function serializeProfile(profile, authUser) {
     phone: profile.phone ?? '',
     location: profile.location ?? '',
     bio: profile.bio ?? '',
-    image: profile.image ?? authUser?.image ?? null,
+    image,
     createdAt: profile.createdAt ?? null,
     updatedAt: profile.updatedAt ?? null,
   };
@@ -555,9 +747,7 @@ function validateProfileBody(body, { allowEmpty = false } = {}) {
       if (phone && !/^[+\d\s()-]{7,20}$/.test(phone)) {
         errors.push('Enter a valid phone number.');
       } else if (phone.length > PROFILE_LIMITS.phone) {
-        errors.push(
-          `Phone must be ${PROFILE_LIMITS.phone} characters or fewer.`
-        );
+        errors.push(`Phone must be ${PROFILE_LIMITS.phone} characters or fewer.`);
       } else {
         values.phone = phone;
       }
@@ -570,9 +760,7 @@ function validateProfileBody(body, { allowEmpty = false } = {}) {
     } else {
       const location = body.location.trim();
       if (location.length > PROFILE_LIMITS.location) {
-        errors.push(
-          `Location must be ${PROFILE_LIMITS.location} characters or fewer.`
-        );
+        errors.push(`Location must be ${PROFILE_LIMITS.location} characters or fewer.`);
       } else {
         values.location = location;
       }
@@ -585,9 +773,7 @@ function validateProfileBody(body, { allowEmpty = false } = {}) {
     } else {
       const bio = body.bio.trim();
       if (bio.length > PROFILE_LIMITS.bio) {
-        errors.push(
-          `Bio must be ${PROFILE_LIMITS.bio} characters or fewer.`
-        );
+        errors.push(`Bio must be ${PROFILE_LIMITS.bio} characters or fewer.`);
       } else {
         values.bio = bio;
       }
@@ -602,9 +788,7 @@ function validateProfileBody(body, { allowEmpty = false } = {}) {
     } else {
       const image = body.image.trim();
       if (image.length > PROFILE_LIMITS.image) {
-        errors.push(
-          `Image URL must be ${PROFILE_LIMITS.image} characters or fewer.`
-        );
+        errors.push(`Image URL must be ${PROFILE_LIMITS.image} characters or fewer.`);
       } else if (image && !isValidHttpUrl(image)) {
         errors.push('Image must be a valid http(s) URL.');
       } else {
@@ -640,6 +824,10 @@ function buildProfileUpdate(values, { userId, authUser, now }) {
     }
   }
 
+  if ('image' in values) {
+    clearProfileImageFields(unset);
+  }
+
   const setOnInsert = {
     userId,
     createdAt: now,
@@ -665,25 +853,22 @@ function buildProfileUpdate(values, { userId, authUser, now }) {
   return update;
 }
 
-async function getProfileStats(userId, authUser) {
-  const safeCount = (promise) =>
-    promise.catch((error) => {
-      console.error('Profile stats query failed:', error?.message || error);
-      return 0;
-    });
+function clearProfileImageFields(unset) {
+  Object.assign(unset, {
+    imageData: '',
+    imageContentType: '',
+    imageUpdatedAt: '',
+    imageVersion: '',
+  });
+}
 
+async function getProfileStats(userId, authUser) {
   const [bookingCount, listingCount] = await Promise.all([
-    safeCount(
-      bookings.countDocuments({
-        $or: [{ renterId: userId }, { userId }],
-      })
-    ),
-    safeCount(studios.countDocuments({ ownerId: userId })),
+    bookings.countDocuments(renterBookingFilter(userId)),
+    studios.countDocuments({ ownerId: userId }),
   ]);
 
-  const accountCreatedAt = authUser?.createdAt
-    ? new Date(authUser.createdAt)
-    : null;
+  const accountCreatedAt = authUser?.createdAt ? new Date(authUser.createdAt) : null;
   const memberSince =
     accountCreatedAt && !Number.isNaN(accountCreatedAt.getTime())
       ? accountCreatedAt.getFullYear()
@@ -696,140 +881,2174 @@ async function getProfileStats(userId, authUser) {
   };
 }
 
+function getDhakaDateParts(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dhaka',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+}
+
+function getRecentDhakaMonths(date, count = 6) {
+  const { year, month } = getDhakaDateParts(date);
+  const currentMonth = Number(month) - 1;
+
+  return Array.from({ length: count }, (_, index) => {
+    const monthDate = new Date(Date.UTC(Number(year), currentMonth - (count - index - 1), 1));
+    const monthYear = monthDate.getUTCFullYear();
+    const monthNumber = String(monthDate.getUTCMonth() + 1).padStart(2, '0');
+
+    return {
+      key: `${monthYear}-${monthNumber}`,
+      label: new Intl.DateTimeFormat('en', {
+        month: 'short',
+        timeZone: 'UTC',
+      }).format(monthDate),
+    };
+  });
+}
+
+async function getDashboardStats(userId, now = new Date()) {
+  const renterFilter = renterBookingFilter(userId);
+  const todayParts = getDhakaDateParts(now);
+  const today = `${todayParts.year}-${todayParts.month}-${todayParts.day}`;
+  const recentMonths = getRecentDhakaMonths(now);
+
+  const [
+    renterBookings,
+    upcomingBookings,
+    renterSpending,
+    ownedStudios,
+    hostBookings,
+    pendingRequests,
+    hostEarnings,
+    wishlist,
+    monthlyEarnings,
+  ] = await Promise.all([
+    bookings.countDocuments(renterFilter),
+    bookings.countDocuments({
+      ...renterFilter,
+      bookingDate: { $gte: today },
+      status: { $in: ['Pending', 'Confirmed'] },
+    }),
+    bookings
+      .aggregate([
+        {
+          $match: {
+            ...renterFilter,
+            status: 'Completed',
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: {
+              $sum: { $ifNull: ['$total', { $ifNull: ['$subtotal', 0] }] },
+            },
+          },
+        },
+      ])
+      .toArray(),
+    studios.countDocuments({ ownerId: userId }),
+    bookings.countDocuments({ ownerId: userId }),
+    bookings.countDocuments({ ownerId: userId, status: 'Pending' }),
+    bookings
+      .aggregate([
+        {
+          $match: {
+            ownerId: userId,
+            status: 'Completed',
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ['$subtotal', 0] } },
+          },
+        },
+      ])
+      .toArray(),
+    wishlists.findOne({ userId }, { projection: { studioIds: 1 } }),
+    bookings
+      .aggregate([
+        {
+          $match: {
+            ownerId: userId,
+            status: 'Completed',
+            bookingDate: { $in: recentMonths.map(({ key }) => key) },
+          },
+        },
+        {
+          $group: {
+            _id: { $substrBytes: ['$bookingDate', 0, 7] },
+            amount: { $sum: { $ifNull: ['$subtotal', 0] } },
+          },
+        },
+      ])
+      .toArray(),
+  ]);
+
+  const savedStudioIds = Array.isArray(wishlist?.studioIds)
+    ? [...new Set(wishlist.studioIds.filter(isValidObjectId))]
+    : [];
+  const savedStudios = savedStudioIds.length
+    ? await studios.countDocuments({
+        _id: { $in: savedStudioIds.map((id) => new ObjectId(id)) },
+        status: { $in: ['active', 'published'] },
+      })
+    : 0;
+  const monthlyTotals = new Map(monthlyEarnings.map(({ _id, amount }) => [_id, amount]));
+
+  return {
+    renter: {
+      totalBookings: renterBookings,
+      savedStudios,
+      upcomingBookings,
+      totalSpent: renterSpending[0]?.total || 0,
+    },
+    host: {
+      totalStudios: ownedStudios,
+      totalBookings: hostBookings,
+      pendingRequests,
+      earnings: hostEarnings[0]?.total || 0,
+      monthlyEarnings: recentMonths.map(({ key, label }) => ({
+        month: label,
+        amount: monthlyTotals.get(key) || 0,
+      })),
+    },
+  };
+}
+
+function serializeRecord(document) {
+  const { _id, ...record } = document;
+  return { ...record, id: String(_id) };
+}
+
+function serializeReview(document) {
+  const { _id, userId, bookingId, ...review } = document;
+  return { ...review, id: String(_id) };
+}
+
+function serializeNotification(document) {
+  const { _id, userId, ...notification } = document;
+  return { ...notification, id: String(_id) };
+}
+
+async function insertNotification(userId, notification, session) {
+  if (typeof userId !== 'string' || !userId) return;
+
+  await notifications.insertOne(
+    {
+      _id: new ObjectId(),
+      userId,
+      ...notification,
+      isRead: false,
+      createdAt: new Date(),
+    },
+    { session },
+  );
+}
+
+function formatBookingNotificationDate(booking) {
+  const date = new Date(`${booking.bookingDate}T00:00:00+06:00`);
+  if (Number.isNaN(date.getTime())) return cleanText(booking.bookingDate);
+
+  return new Intl.DateTimeFormat('en-BD', {
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'Asia/Dhaka',
+  }).format(date);
+}
+
+function bookingError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function renterBookingFilter(userId) {
+  return { $or: [{ renterId: userId }, { userId }] };
+}
+
+function bookingParticipantFilter(userId) {
+  return {
+    $or: [{ renterId: userId }, { ownerId: userId }, { userId }],
+  };
+}
+
+function isValidBookingDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function bookingTimeMinutes(value) {
+  if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    return null;
+  }
+
+  const [hours, minutes] = value.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+const STUDIO_WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function legacyOpeningHours(availableDays, opens, closes) {
+  const days = new Set(Array.isArray(availableDays) ? availableDays : STUDIO_WEEKDAYS.slice(0, 6));
+  if ([...days].some((day) => !STUDIO_WEEKDAYS.includes(day))) {
+    throw studioValidationError('Studio available days are invalid');
+  }
+  const openMinutes = bookingTimeMinutes(opens);
+  const closeMinutes = bookingTimeMinutes(closes);
+  if (days.size > 0 && (openMinutes === null || closeMinutes <= openMinutes)) {
+    throw studioValidationError('Studio legacy opening hours are invalid');
+  }
+  const openTime = openMinutes === null ? '08:00' : opens;
+  const closeTime = closeMinutes === null ? '22:00' : closes;
+
+  return Object.fromEntries(
+    STUDIO_WEEKDAYS.map((day) => [
+      day,
+      { opens: openTime, closes: closeTime, closed: !days.has(day) },
+    ]),
+  );
+}
+
+function normalizeOpeningHours(value, availableDays, opens, closes) {
+  if (value === undefined || value === null) {
+    return legacyOpeningHours(availableDays, opens, closes);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw studioValidationError('Studio opening hours are invalid');
+  }
+
+  const schedule = {};
+  for (const day of STUDIO_WEEKDAYS) {
+    const hours = value[day];
+    const openingMinutes = bookingTimeMinutes(hours?.opens);
+    const closingMinutes = bookingTimeMinutes(hours?.closes);
+    if (
+      !hours ||
+      typeof hours !== 'object' ||
+      Array.isArray(hours) ||
+      typeof hours.closed !== 'boolean' ||
+      openingMinutes === null ||
+      closingMinutes === null ||
+      (!hours.closed && closingMinutes <= openingMinutes)
+    ) {
+      throw studioValidationError(`Studio opening hours are invalid for ${day}`);
+    }
+
+    schedule[day] = {
+      opens: hours.opens,
+      closes: hours.closes,
+      closed: hours.closed,
+    };
+  }
+  return schedule;
+}
+
+function bookingHasEnded(booking) {
+  const endAt = Date.parse(`${booking.bookingDate}T${booking.endTime}:00+06:00`);
+  return Number.isFinite(endAt) && endAt <= Date.now();
+}
+
+function validateBookingDetails(studio, input) {
+  const bookingDate = input?.bookingDate;
+  const startTime = input?.startTime;
+  const endTime = input?.endTime;
+  const startMinutes = bookingTimeMinutes(startTime);
+  const endMinutes = bookingTimeMinutes(endTime);
+  const guests = input?.guests;
+
+  if (!isValidBookingDate(bookingDate) || startMinutes === null || endMinutes === null) {
+    throw bookingError(400, 'Choose a valid booking date and time');
+  }
+  if (endMinutes <= startMinutes) {
+    throw bookingError(400, 'The booking end time must be after the start time');
+  }
+
+  const startAt = Date.parse(`${bookingDate}T${startTime}:00+06:00`);
+  if (!Number.isFinite(startAt) || startAt <= Date.now()) {
+    throw bookingError(400, 'Choose a future booking time');
+  }
+
+  const durationHours = (endMinutes - startMinutes) / 60;
+  const minimumHours = Number(studio.details?.minimumHours) || 1;
+  const capacity = Number(studio.details?.maxGuests) || 0;
+  if (durationHours < minimumHours) {
+    throw bookingError(400, `This studio requires a minimum booking of ${minimumHours} hours`);
+  }
+  if (!Number.isInteger(guests) || guests < 1 || guests > capacity) {
+    throw bookingError(400, `Guest count must be between 1 and ${capacity}`);
+  }
+
+  const day = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    weekday: 'short',
+  }).format(new Date(`${bookingDate}T12:00:00.000Z`));
+  const dailyHours = normalizeOpeningHours(
+    studio.details?.openingHours,
+    studio.details?.availableDays,
+    studio.details?.opens,
+    studio.details?.closes,
+  )[day];
+  if (!dailyHours || dailyHours.closed) {
+    throw bookingError(409, 'This studio is not available on that day');
+  }
+  if (studio.details?.unavailableDate === bookingDate) {
+    throw bookingError(409, 'This studio is unavailable on that date');
+  }
+
+  const opens = bookingTimeMinutes(dailyHours.opens);
+  const closes = bookingTimeMinutes(dailyHours.closes);
+  if (opens !== null && closes !== null && (startMinutes < opens || endMinutes > closes)) {
+    throw bookingError(409, 'Choose a time within the studio opening hours');
+  }
+
+  const hourlyRate = Number(studio.price ?? studio.details?.hourlyRate);
+  if (!Number.isFinite(hourlyRate) || hourlyRate <= 0) {
+    throw bookingError(409, 'This studio is not available for booking');
+  }
+
+  const subtotal = hourlyRate * durationHours;
+  const serviceFee = Math.round(subtotal * BOOKING_SERVICE_FEE_RATE);
+  const firstPhoto = studio.details?.photos?.[0];
+  const studioImage =
+    typeof firstPhoto === 'string' && firstPhoto.startsWith('stored:')
+      ? `/api/studios/${studio._id}/photos/0`
+      : firstPhoto || null;
+
+  return {
+    studioId: String(studio._id),
+    ownerId: studio.ownerId,
+    renterId: null,
+    userId: null,
+    studioName: cleanText(studio.name || studio.details?.name),
+    studioLocation: [
+      cleanText(studio.city || studio.details?.city),
+      cleanText(studio.details?.country),
+    ]
+      .filter(Boolean)
+      .join(', '),
+    studioImage,
+    hostName: cleanText(studio.ownerName) || 'Studio host',
+    bookingDate,
+    startTime,
+    endTime,
+    durationHours,
+    guests,
+    hourlyRate,
+    subtotal,
+    serviceFee,
+    total: subtotal + serviceFee,
+  };
+}
+
+function getRasterImageContentType(image) {
+  if (!Buffer.isBuffer(image)) return null;
+  if (image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (
+    image.length >= 8 &&
+    image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return 'image/png';
+  }
+  if (image.length >= 6 && ['GIF87a', 'GIF89a'].includes(image.toString('ascii', 0, 6))) {
+    return 'image/gif';
+  }
+  if (
+    image.length >= 12 &&
+    image.toString('ascii', 0, 4) === 'RIFF' &&
+    image.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+const SAFE_SVG_ELEMENTS = new Set([
+  'svg', 'g', 'defs', 'path', 'rect', 'circle', 'ellipse', 'line',
+  'polyline', 'polygon', 'lineargradient', 'radialgradient', 'stop',
+  'clippath', 'mask', 'pattern', 'symbol', 'use', 'title', 'desc',
+  'text', 'tspan',
+]);
+const SAFE_SVG_ATTRIBUTES = new Set([
+  'xmlns', 'xmlns:xlink', 'id', 'width', 'height', 'viewbox',
+  'preserveaspectratio', 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2',
+  'cx', 'cy', 'r', 'rx', 'ry', 'points', 'fill', 'fill-rule',
+  'clip-rule', 'stroke', 'stroke-width', 'stroke-linecap',
+  'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset',
+  'opacity', 'fill-opacity', 'stroke-opacity', 'transform', 'offset',
+  'stop-color', 'stop-opacity', 'gradientunits', 'gradienttransform',
+  'spreadmethod', 'clippathunits', 'maskunits', 'maskcontentunits',
+  'patternunits', 'patterncontentunits', 'patterntransform',
+  'font-family', 'font-size', 'font-weight', 'text-anchor',
+  'dominant-baseline', 'href', 'xlink:href',
+]);
+
+function sanitizeSvgImage(image) {
+  if (!Buffer.isBuffer(image) || image.length === 0) return null;
+  const source = image.toString('utf8').replace(/^\uFEFF/, '');
+  if (/<!DOCTYPE|<!ENTITY/i.test(source)) return null;
+
+  try {
+    const document = new DOMParser({
+      onError() {
+        throw new Error('Invalid SVG document');
+      },
+    }).parseFromString(source, 'image/svg+xml');
+    const root = document.documentElement;
+    if (
+      !root ||
+      root.localName.toLowerCase() !== 'svg' ||
+      (root.namespaceURI &&
+        root.namespaceURI !== 'http://www.w3.org/2000/svg')
+    ) {
+      return null;
+    }
+
+    function clean(element) {
+      for (const child of Array.from(element.childNodes)) {
+        if (child.nodeType === 1) {
+          if (!SAFE_SVG_ELEMENTS.has(child.localName.toLowerCase())) {
+            element.removeChild(child);
+            continue;
+          }
+          clean(child);
+        } else if (child.nodeType === 7 || child.nodeType === 8 || child.nodeType === 10) {
+          element.removeChild(child);
+        }
+      }
+
+      for (const attribute of Array.from(element.attributes)) {
+        const name = attribute.name.toLowerCase();
+        const value = attribute.value.trim();
+        const localReference = /^#[\w:.-]+$/.test(value);
+        const localUrl = /^url\(\s*(['"]?)#[\w:.-]+\1\s*\)$/i.test(value);
+        const invalidUrl = /url\s*\(/i.test(value) && !localUrl;
+        if (
+          !SAFE_SVG_ATTRIBUTES.has(name) ||
+          (name === 'xmlns' && value !== 'http://www.w3.org/2000/svg') ||
+          (name === 'xmlns:xlink' && value !== 'http://www.w3.org/1999/xlink') ||
+          ((name === 'href' || name === 'xlink:href') && !localReference) ||
+          invalidUrl ||
+          /javascript:|data:/i.test(value)
+        ) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    }
+
+    if (!root.hasAttribute('xmlns')) {
+      root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    }
+    clean(root);
+    const sanitized = Buffer.from(
+      new XMLSerializer().serializeToString(root),
+      'utf8',
+    );
+    return sanitized.length > 0 && sanitized.length <= PROFILE_IMAGE_MAX_BYTES
+      ? sanitized
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeImageBuffer(image) {
+  const rasterType = getRasterImageContentType(image);
+  if (rasterType) return { buffer: image, contentType: rasterType };
+
+  const sanitizedSvg = sanitizeSvgImage(image);
+  return sanitizedSvg
+    ? { buffer: sanitizedSvg, contentType: 'image/svg+xml' }
+    : null;
+}
+
+function studioValidationError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
+function normalizeStudioPhoto(photo, existing, studioId, photoData) {
+  if (typeof photo !== 'string') {
+    throw studioValidationError('A studio photo is invalid or too large');
+  }
+
+  if (photo.startsWith('data:')) {
+    const dataUrl = /^data:[^;,]+;base64,([A-Za-z0-9+/]+={0,2})$/.exec(photo);
+    if (!dataUrl || photo.length > MAX_STUDIO_PHOTO_DATA_URL_LENGTH) {
+      throw studioValidationError(
+        'Use a valid JPEG, PNG, WebP, GIF or SVG image up to 1 MB',
+      );
+    }
+
+    const originalImage = Buffer.from(dataUrl[1], 'base64');
+    const normalizedImage = normalizeImageBuffer(originalImage);
+    if (
+      originalImage.length === 0 ||
+      originalImage.length > STUDIO_PHOTO_MAX_BYTES ||
+      originalImage.toString('base64') !== dataUrl[1] ||
+      !normalizedImage
+    ) {
+      throw studioValidationError(
+        'Use a valid JPEG, PNG, WebP, GIF or SVG image up to 1 MB',
+      );
+    }
+
+    const reference = `stored:${new ObjectId()}`;
+    photoData[reference] = {
+      contentType: normalizedImage.contentType,
+      data: normalizedImage.buffer.toString('base64'),
+    };
+    return reference;
+  }
+
+  if (photo.length > 2048) {
+    throw studioValidationError('A studio photo URL is invalid');
+  }
+
+  const storedPhoto = photo.match(/\/api\/studios\/([a-f\d]{24})\/photos\/(\d+)(?:\?.*)?$/i);
+  if (storedPhoto && storedPhoto[1].toLowerCase() === studioId.toLowerCase()) {
+    const previous = existing?.details?.photos?.[Number(storedPhoto[2])];
+    if (typeof previous === 'string' && existing.photoData?.[previous]) {
+      photoData[previous] = existing.photoData[previous];
+      return previous;
+    }
+    throw studioValidationError('A saved studio photo could not be found');
+  }
+
+  if (photo.startsWith('/_next/static/')) return photo;
+
+  try {
+    const url = new URL(photo);
+    if (url.protocol === 'https:' || url.protocol === 'http:') return photo;
+  } catch {
+    // Invalid URL values are rejected below.
+  }
+
+  throw studioValidationError('A studio photo URL is invalid');
+}
+
+function normalizeStudioDetails(input, existing, studioId) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw studioValidationError('Studio details are required');
+  }
+
+  const stringLimits = {
+    name: 120,
+    category: 64,
+    shortDescription: 240,
+    fullDescription: 5000,
+    country: 100,
+    city: 100,
+    area: 120,
+    streetAddress: 250,
+    hourlyRate: 16,
+    minimumHours: 16,
+    cleaningFee: 16,
+    maxGuests: 16,
+    studioSize: 16,
+    opens: 16,
+    closes: 16,
+    unavailableDate: 32,
+    cancellationPolicy: 40,
+    studioRules: 5000,
+    additionalInstructions: 2000,
+  };
+  const details = {};
+
+  for (const [field, maxLength] of Object.entries(stringLimits)) {
+    const value = input[field];
+    if (typeof value !== 'string' || value.length > maxLength) {
+      throw studioValidationError(`Studio ${field} is invalid`);
+    }
+    details[field] = value;
+  }
+
+  if (!STUDIO_CATEGORIES.has(details.category)) {
+    throw studioValidationError('Choose a supported studio category');
+  }
+
+  for (const field of ['amenities', 'availableDays']) {
+    const values = input[field];
+    const maxLength = field === 'amenities' ? 32 : 7;
+    if (
+      !Array.isArray(values) ||
+      values.length > maxLength ||
+      values.some((value) => typeof value !== 'string' || value.length > 100)
+    ) {
+      throw studioValidationError(`Studio ${field} are invalid`);
+    }
+    details[field] = [...new Set(values)];
+  }
+  details.openingHours = normalizeOpeningHours(
+    input.openingHours,
+    details.availableDays,
+    details.opens,
+    details.closes,
+  );
+  details.availableDays = STUDIO_WEEKDAYS.filter((day) => !details.openingHours[day].closed);
+  const firstOpenDay = STUDIO_WEEKDAYS.find((day) => !details.openingHours[day].closed);
+  if (firstOpenDay) {
+    details.opens = details.openingHours[firstOpenDay].opens;
+    details.closes = details.openingHours[firstOpenDay].closes;
+  }
+
+  if (!Array.isArray(input.photos) || input.photos.length > STUDIO_PHOTO_MAX_COUNT) {
+    throw studioValidationError(`Add no more than ${STUDIO_PHOTO_MAX_COUNT} studio photos`);
+  }
+  const photoData = {};
+  details.photos = input.photos.map((photo) =>
+    normalizeStudioPhoto(photo, existing, studioId, photoData),
+  );
+  return { details, photoData };
+}
+
+function validatePublishableStudio(details) {
+  const name = typeof details?.name === 'string' ? details.name.trim() : '';
+  const description =
+    typeof details?.shortDescription === 'string' ? details.shortDescription.trim() : '';
+  const city = typeof details?.city === 'string' ? details.city.trim() : '';
+  const price = Number(details?.hourlyRate);
+  const minimumHours = Number(details?.minimumHours);
+  const capacity = Number(details?.maxGuests);
+  const photos = Array.isArray(details?.photos) ? details.photos : [];
+  if (
+    !name ||
+    !description ||
+    !city ||
+    !Number.isFinite(price) ||
+    price <= 0 ||
+    !Number.isFinite(minimumHours) ||
+    minimumHours <= 0 ||
+    !Number.isFinite(capacity) ||
+    capacity < 1 ||
+    photos.length === 0
+  ) {
+    throw studioValidationError(
+      'Published studios need a name, description, city, valid hourly rate, minimum hours, guest capacity and at least one photo',
+    );
+  }
+  if (!STUDIO_WEEKDAYS.some((day) => !details.openingHours?.[day]?.closed)) {
+    throw studioValidationError('Published studios need to be open at least one day each week');
+  }
+}
+
+function serializeStudio(document, { includePrivate = false } = {}) {
+  const id = String(document._id);
+  const details = { ...(document.details || {}) };
+  details.openingHours = normalizeOpeningHours(
+    details.openingHours,
+    details.availableDays,
+    details.opens,
+    details.closes,
+  );
+  const photos = (details.photos || []).map((photo, index) =>
+    typeof photo === 'string' && photo.startsWith('stored:')
+      ? `/api/studios/${id}/photos/${index}`
+      : photo,
+  );
+  details.photos = photos;
+  if (!includePrivate) {
+    details.streetAddress = '';
+    details.availableDays = [];
+    details.opens = '';
+    details.closes = '';
+    details.unavailableDate = '';
+    details.additionalInstructions = '';
+  }
+
+  const category = document.category || details.category;
+  const city = document.city || details.city || '';
+  const country = details.country || '';
+
+  return {
+    id,
+    ownerId: includePrivate ? document.ownerId : undefined,
+    name: document.name || details.name || '',
+    category,
+    categoryLabel: STUDIO_CATEGORY_LABELS[category] || category,
+    discipline: STUDIO_CATEGORY_DISCIPLINES[category] || category,
+    city,
+    location: [city, country].filter(Boolean).join(', '),
+    price: Number(document.price ?? details.hourlyRate) || 0,
+    status: document.status,
+    featured: document.featured === true,
+    rating: Number(document.rating) || 0,
+    reviews: Number(document.reviewCount) || 0,
+    image: photos[0] || null,
+    photos,
+    details,
+    ownerName: document.ownerName || 'Studio host',
+    ownerCreatedAt: document.ownerCreatedAt || null,
+    createdAt: document.createdAt || null,
+    updatedAt: document.updatedAt || null,
+  };
+}
+
 /* ------------------------------------------------------------------ */
-/* 6. User Profile API                                                 */
+/* 6. Marketplace read APIs                                            */
+/* ------------------------------------------------------------------ */
+
+app.post(
+  '/api/contact',
+  withApiErrorHandling(
+    async (req, res) => {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const email = normalizeEmail(body.email);
+      const topic = typeof body.topic === 'string' ? body.topic.trim() : '';
+      const message = typeof body.message === 'string' ? body.message.trim() : '';
+
+      if (
+        !name ||
+        name.length > CONTACT_NAME_MAX_LENGTH ||
+        !isValidEmail(email) ||
+        !topic ||
+        topic.length > CONTACT_TOPIC_MAX_LENGTH ||
+        !message ||
+        message.length > CONTACT_MESSAGE_MAX_LENGTH
+      ) {
+        return sendError(res, 400, 'Please provide valid contact form details');
+      }
+
+      const now = new Date();
+      await contactMessages.insertOne({
+        name,
+        email,
+        topic,
+        message,
+        status: 'new',
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      return sendSuccess(res, {
+        status: 201,
+        message: 'Contact message received',
+        data: { received: true },
+      });
+    },
+    'Could not save your message',
+    {
+      logMessage: 'Failed to store contact message:',
+    },
+  ),
+);
+
+app.post(
+  '/api/newsletter',
+  withApiErrorHandling(
+    async (req, res) => {
+      const email = normalizeEmail(req.body?.email);
+      if (!isValidEmail(email)) {
+        return sendError(res, 400, 'Please provide a valid email address');
+      }
+
+      const now = new Date();
+      const result = await newsletterSubscribers.updateOne(
+        { email },
+        {
+          $setOnInsert: { email, createdAt: now },
+          $set: { updatedAt: now },
+        },
+        { upsert: true },
+      );
+      const alreadySubscribed = result.upsertedCount === 0;
+
+      return sendSuccess(res, {
+        status: alreadySubscribed ? 200 : 201,
+        message: alreadySubscribed
+          ? 'Email is already subscribed'
+          : 'Newsletter subscription saved',
+        data: { subscribed: true, alreadySubscribed },
+      });
+    },
+    'Could not save your subscription',
+    {
+      logMessage: 'Failed to save newsletter subscription:',
+      onError(error, _req, res) {
+        if (error?.code === 11000) {
+          return sendSuccess(res, {
+            message: 'Email is already subscribed',
+            data: { subscribed: true, alreadySubscribed: true },
+          });
+        }
+
+        console.error('Failed to save newsletter subscription:', error);
+        return sendError(res, 500, 'Could not save your subscription');
+      },
+    },
+  ),
+);
+
+/**
+ * GET /api/stats
+ * Return the signed-in user's renter and host dashboard metrics.
+ */
+app.get(
+  '/api/stats',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const data = await getDashboardStats(req.userId);
+    return sendSuccess(res, { message: 'Dashboard stats loaded', data });
+  }, 'Failed to load dashboard stats'),
+);
+
+app.get(
+  '/api/host/onboarding',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const data = await getHostOnboardingState(req.userId);
+    return sendSuccess(res, { message: 'Host onboarding status loaded', data });
+  }, 'Failed to load host onboarding status'),
+);
+
+app.patch(
+  '/api/host/onboarding/progress',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const step = req.body?.step;
+    if (!Number.isInteger(step) || step < 0 || step >= 8) {
+      return sendError(res, 400, 'The host onboarding step is invalid');
+    }
+
+    const state = await getHostOnboardingState(req.userId);
+    if (step > state.currentStep + 1) {
+      return sendError(res, 409, 'Complete the previous step first');
+    }
+    if (step > 1 && !state.profileComplete) {
+      return sendError(
+        res,
+        400,
+        `Enter a full name of ${PROFILE_LIMITS.name} characters or fewer in your profile before continuing`,
+      );
+    }
+
+    const now = new Date();
+    const update = {
+      $set: {
+        email: cleanText(req.authUser.email),
+        hostOnboardingStep: step,
+        updatedAt: now,
+      },
+      $setOnInsert: {
+        userId: req.userId,
+        createdAt: now,
+      },
+    };
+
+    try {
+      await userProfiles.updateOne({ userId: req.userId }, update, {
+        upsert: true,
+      });
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      await userProfiles.updateOne(
+        { userId: req.userId },
+        { $set: update.$set },
+      );
+    }
+
+    const data = await getHostOnboardingState(req.userId);
+    return sendSuccess(res, {
+      message: 'Host onboarding progress saved',
+      data,
+    });
+  }, 'Failed to save host onboarding progress'),
+);
+
+app.post(
+  '/api/host/onboarding/complete',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const state = await getHostOnboardingState(req.userId);
+
+    if (state.hasHostedStudio || state.onboardingCompleted) {
+      return sendSuccess(res, {
+        message: 'Host onboarding is already complete',
+        data: state,
+      });
+    }
+
+    if (!state.profileComplete) {
+      return sendError(
+        res,
+        400,
+        `Enter a full name of ${PROFILE_LIMITS.name} characters or fewer in your profile before starting to host`,
+      );
+    }
+    if (state.currentStep < 7) {
+      return sendError(res, 409, 'Complete each hosting journey step first');
+    }
+
+    const now = new Date();
+    const update = {
+      $set: {
+        hostOnboardingCompleted: true,
+        hostOnboardingStep: 7,
+        updatedAt: now,
+      },
+      $setOnInsert: {
+        userId: req.userId,
+        name: cleanText(req.authUser.name),
+        email: cleanText(req.authUser.email),
+        createdAt: now,
+      },
+    };
+
+    try {
+      await userProfiles.updateOne({ userId: req.userId }, update, { upsert: true });
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      await userProfiles.updateOne(
+        { userId: req.userId },
+        {
+          $set: {
+            hostOnboardingCompleted: true,
+            hostOnboardingStep: 7,
+            updatedAt: now,
+          },
+        },
+      );
+    }
+
+    const data = await getHostOnboardingState(req.userId);
+    return sendSuccess(res, { message: 'Host onboarding completed', data });
+  }, 'Failed to complete host onboarding'),
+);
+
+/**
+ * GET /api/wishlists
+ * Return the signed-in user's saved, currently published studios.
+ */
+app.get(
+  '/api/wishlists',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const wishlist = await wishlists.findOne(
+      { userId: req.userId },
+      { projection: { studioIds: 1 } },
+    );
+    const studioIds = Array.isArray(wishlist?.studioIds)
+      ? wishlist.studioIds.filter(isValidObjectId)
+      : [];
+    const objectIds = studioIds.map((id) => new ObjectId(id));
+
+    const savedStudios = objectIds.length
+      ? await studios
+          .find(
+            {
+              _id: { $in: objectIds },
+              status: { $in: ['active', 'published'] },
+            },
+            { projection: { photoData: 0 } },
+          )
+          .toArray()
+      : [];
+    const studiosById = new Map(savedStudios.map((studio) => [String(studio._id), studio]));
+
+    return sendSuccess(res, {
+      message: 'Saved studios loaded',
+      data: studioIds
+        .map((id) => studiosById.get(id))
+        .filter(Boolean)
+        .map((studio) => serializeStudio(studio)),
+    });
+  }, 'Failed to load saved studios'),
+);
+
+/**
+ * POST /api/wishlists
+ * Save a published studio for the verified session user.
+ */
+app.post(
+  '/api/wishlists',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const studioId = typeof req.body?.studioId === 'string' ? req.body.studioId.trim() : '';
+    if (!isValidObjectId(studioId)) {
+      return sendError(res, 400, 'Studio id is invalid');
+    }
+
+    const studio = await studios.findOne({
+      _id: new ObjectId(studioId),
+      status: { $in: ['active', 'published'] },
+    });
+    if (!studio) return sendError(res, 404, 'Studio not found');
+
+    const now = new Date();
+    try {
+      await wishlists.updateOne(
+        { userId: req.userId },
+        {
+          $setOnInsert: { userId: req.userId, createdAt: now },
+          $addToSet: { studioIds: studioId },
+          $set: { updatedAt: now },
+        },
+        { upsert: true },
+      );
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      await wishlists.updateOne(
+        { userId: req.userId },
+        {
+          $addToSet: { studioIds: studioId },
+          $set: { updatedAt: now },
+        },
+      );
+    }
+
+    return sendSuccess(res, {
+      status: 201,
+      message: 'Studio saved',
+      data: serializeStudio(studio),
+    });
+  }, 'Failed to save studio'),
+);
+
+/**
+ * DELETE /api/wishlists/:studioId
+ * Remove a studio from the verified user's saved list.
+ */
+app.delete(
+  '/api/wishlists/:studioId',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const { studioId } = req.params;
+    if (!isValidObjectId(studioId)) {
+      return sendError(res, 400, 'Studio id is invalid');
+    }
+
+    await wishlists.updateOne(
+      { userId: req.userId },
+      {
+        $pull: { studioIds: studioId },
+        $set: { updatedAt: new Date() },
+      },
+    );
+    return sendSuccess(res, {
+      message: 'Studio removed from saved studios',
+      data: { studioId },
+    });
+  }, 'Failed to remove saved studio'),
+);
+
+/**
+ * GET /api/studios
+ * Return studios available to renters; drafts are not public.
+ */
+app.get(
+  '/api/studios',
+  withApiErrorHandling(async (_req, res) => {
+    const data = await studios
+      .find({ status: { $in: ['active', 'published'] } }, { projection: { photoData: 0 } })
+      .sort({ createdAt: -1 })
+      .toArray();
+    return sendSuccess(res, {
+      message: 'Studios loaded',
+      data: data.map((studio) => serializeStudio(studio)),
+    });
+  }, 'Failed to load studios'),
+);
+
+app.get(
+  '/api/studios/mine',
+  requireSession,
+  withApiErrorHandling(
+    async (req, res) => {
+      const data = await studios
+        .find({ ownerId: req.userId }, { projection: { photoData: 0 } })
+        .sort({ updatedAt: -1 })
+        .toArray();
+      return sendSuccess(res, {
+        message: 'Your studios loaded',
+        data: data.map((studio) => serializeStudio(studio, { includePrivate: true })),
+      });
+    },
+    'Failed to load your studios',
+    {
+      logMessage: 'Failed to load host studios:',
+    },
+  ),
+);
+
+app.get(
+  '/api/studios/mine/:id',
+  requireSession,
+  withApiErrorHandling(
+    async (req, res) => {
+      if (!isValidObjectId(req.params.id)) {
+        return sendError(res, 404, 'Studio not found');
+      }
+
+      const studio = await studios.findOne(
+        { _id: new ObjectId(req.params.id), ownerId: req.userId },
+        { projection: { photoData: 0 } },
+      );
+      if (!studio) return sendError(res, 404, 'Studio not found');
+
+      return sendSuccess(res, {
+        message: 'Studio loaded',
+        data: serializeStudio(studio, { includePrivate: true }),
+      });
+    },
+    'Failed to load studio',
+    { logMessage: 'Failed to load host studio:' },
+  ),
+);
+
+app.post(
+  '/api/studios',
+  requireSession,
+  handleStudioJsonBody,
+  withStudioErrorHandling(async (req, res) => {
+    const status = req.body?.status || 'draft';
+    if (!['draft', 'published'].includes(status)) {
+      return sendError(res, 400, 'Studio status is invalid');
+    }
+
+    const id = new ObjectId();
+    const { details, photoData } = normalizeStudioDetails(req.body?.details, null, String(id));
+    if (status === 'published') validatePublishableStudio(details);
+
+    const now = new Date();
+    const studio = {
+      _id: id,
+      ownerId: req.userId,
+      ownerName: cleanText(req.authUser.name) || 'Studio host',
+      ownerCreatedAt: req.authUser.createdAt ? new Date(req.authUser.createdAt) : null,
+      name: cleanText(details.name),
+      category: details.category,
+      city: cleanText(details.city),
+      price: Number(details.hourlyRate) || 0,
+      status,
+      featured: false,
+      rating: 0,
+      reviewCount: 0,
+      details,
+      photoData,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await studios.insertOne(studio);
+    return sendSuccess(res, {
+      status: 201,
+      message: 'Studio created',
+      data: serializeStudio(studio, { includePrivate: true }),
+    });
+  }, 'Failed to create studio'),
+);
+
+app.patch(
+  '/api/studios/:id',
+  requireSession,
+  handleStudioJsonBody,
+  withStudioErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Studio not found');
+    }
+
+    const id = new ObjectId(req.params.id);
+    const current = await studios.findOne({ _id: id, ownerId: req.userId });
+    if (!current) return sendError(res, 404, 'Studio not found');
+
+    const { details, photoData } = normalizeStudioDetails(req.body?.details, current, String(id));
+    const status = req.body?.status ?? current.status;
+    if (!['draft', 'published'].includes(status)) {
+      return sendError(res, 400, 'Studio status is invalid');
+    }
+    if (status === 'published') validatePublishableStudio(details);
+
+    const updated = {
+      ...current,
+      name: cleanText(details.name),
+      category: details.category,
+      city: cleanText(details.city),
+      price: Number(details.hourlyRate) || 0,
+      status,
+      details,
+      photoData,
+      updatedAt: new Date(),
+    };
+    await studios.replaceOne({ _id: id, ownerId: req.userId }, updated);
+
+    return sendSuccess(res, {
+      message: 'Studio updated',
+      data: serializeStudio(updated, { includePrivate: true }),
+    });
+  }, 'Failed to update studio'),
+);
+
+app.patch(
+  '/api/studios/:id/status',
+  requireSession,
+  handleStudioJsonBody,
+  withStudioErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Studio not found');
+    }
+    if (!['draft', 'published'].includes(req.body?.status)) {
+      return sendError(res, 400, 'Studio status is invalid');
+    }
+
+    const id = new ObjectId(req.params.id);
+    const studio = await studios.findOne({ _id: id, ownerId: req.userId });
+    if (!studio) return sendError(res, 404, 'Studio not found');
+    if (req.body.status === 'published') {
+      validatePublishableStudio(studio.details || {});
+    }
+
+    const updated = {
+      ...studio,
+      status: req.body.status,
+      updatedAt: new Date(),
+    };
+    await studios.updateOne(
+      { _id: id, ownerId: req.userId },
+      { $set: { status: updated.status, updatedAt: updated.updatedAt } },
+    );
+    return sendSuccess(res, {
+      message: 'Studio status updated',
+      data: serializeStudio(updated, { includePrivate: true }),
+    });
+  }, 'Failed to change studio status'),
+);
+
+app.delete(
+  '/api/studios/:id',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Studio not found');
+    }
+
+    const result = await studios.deleteOne({
+      _id: new ObjectId(req.params.id),
+      ownerId: req.userId,
+    });
+    if (result.deletedCount === 0) {
+      return sendError(res, 404, 'Studio not found');
+    }
+    return sendSuccess(res, { message: 'Studio deleted' });
+  }, 'Failed to delete studio'),
+);
+
+app.get(
+  '/api/studios/:id/photos/:index',
+  withApiErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id) || !/^\d+$/.test(req.params.index)) {
+      return sendError(res, 404, 'Studio photo not found');
+    }
+
+    const studio = await studios.findOne(
+      { _id: new ObjectId(req.params.id) },
+      {
+        projection: {
+          status: 1,
+          ownerId: 1,
+          'details.photos': 1,
+          photoData: 1,
+        },
+      },
+    );
+    if (!studio) return sendError(res, 404, 'Studio photo not found');
+
+    const isPublic = ['active', 'published'].includes(studio.status);
+    if (!isPublic) {
+      const session = await getBetterAuthSession(req);
+      if (!session?.user?.id || session.user.id !== studio.ownerId) {
+        return sendError(res, 404, 'Studio photo not found');
+      }
+    }
+
+    const photo = studio.details?.photos?.[Number(req.params.index)];
+    const storedPhoto =
+      typeof photo === 'string' && photo.startsWith('stored:') ? studio.photoData?.[photo] : null;
+    if (
+      !storedPhoto ||
+      !STUDIO_PHOTO_TYPES.has(storedPhoto.contentType) ||
+      typeof storedPhoto.data !== 'string'
+    ) {
+      return sendError(res, 404, 'Studio photo not found');
+    }
+
+    const image = Buffer.from(storedPhoto.data, 'base64');
+    const normalizedImage = normalizeImageBuffer(image);
+    if (
+      image.length === 0 ||
+      image.length > STUDIO_PHOTO_MAX_BYTES ||
+      !normalizedImage
+    ) {
+      return sendError(res, 404, 'Studio photo not found');
+    }
+
+    res.set({
+      'Cache-Control': 'private, no-store',
+      'Content-Length': String(normalizedImage.buffer.length),
+      'Content-Type': normalizedImage.contentType,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    if (normalizedImage.contentType === 'image/svg+xml') {
+      res.set('Content-Security-Policy', "default-src 'none'; sandbox");
+    }
+    return res.send(normalizedImage.buffer);
+  }, 'Failed to load studio photo'),
+);
+
+app.get(
+  '/api/studios/:id/contact',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Studio not found');
+    }
+
+    const studio = await studios.findOne(
+      {
+        _id: new ObjectId(req.params.id),
+        status: { $in: ['active', 'published'] },
+      },
+      { projection: { ownerId: 1 } },
+    );
+    if (!studio) return sendError(res, 404, 'Studio not found');
+
+    const profile = await userProfiles.findOne(
+      { userId: studio.ownerId },
+      { projection: { phone: 1 } },
+    );
+    return sendSuccess(res, {
+      message: 'Studio contact loaded',
+      data: { phone: normalizeContactPhone(profile?.phone) },
+    });
+  }, 'Failed to load studio contact'),
+);
+
+app.get(
+  '/api/studios/:id',
+  withApiErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Studio not found');
+    }
+
+    const studio = await studios.findOne(
+      {
+        _id: new ObjectId(req.params.id),
+        status: { $in: ['active', 'published'] },
+      },
+      { projection: { photoData: 0 } },
+    );
+    if (!studio) return sendError(res, 404, 'Studio not found');
+
+    return sendSuccess(res, {
+      message: 'Studio loaded',
+      data: serializeStudio(studio),
+    });
+  }, 'Failed to load studio'),
+);
+
+/**
+ * GET /api/bookings?role=renter|host
+ * Return only bookings associated with the verified user.
+ */
+app.get(
+  '/api/bookings',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const role = typeof req.query.role === 'string' ? req.query.role : '';
+    if (role && !['renter', 'host'].includes(role)) {
+      return sendError(res, 400, 'Booking role is invalid');
+    }
+
+    const filter =
+      role === 'renter'
+        ? renterBookingFilter(req.userId)
+        : role === 'host'
+          ? { ownerId: req.userId }
+          : bookingParticipantFilter(req.userId);
+
+    const data = await bookings.find(filter).sort({ createdAt: -1 }).toArray();
+    return sendSuccess(res, {
+      message: 'Bookings loaded',
+      data: data.map(serializeRecord),
+    });
+  }, 'Failed to load bookings'),
+);
+
+/**
+ * POST /api/bookings
+ * Create a pending booking using the verified renter and stored studio data.
+ */
+app.post(
+  '/api/bookings',
+  requireSession,
+  withBookingErrorHandling(async (req, res) => {
+    const studioId = typeof req.body?.studioId === 'string' ? req.body.studioId.trim() : '';
+    if (!isValidObjectId(studioId)) {
+      return sendError(res, 400, 'Studio id is invalid');
+    }
+
+    const session = client.startSession();
+    let createdBooking;
+    try {
+      await session.withTransaction(async () => {
+        const studio = await studios.findOne(
+          {
+            _id: new ObjectId(studioId),
+            status: { $in: ['active', 'published'] },
+          },
+          { projection: { photoData: 0 }, session },
+        );
+        if (!studio) throw bookingError(404, 'Studio not found');
+        if (studio.ownerId === req.userId) {
+          throw bookingError(403, 'You cannot book your own studio');
+        }
+
+        const bookingDetails = validateBookingDetails(studio, req.body);
+        const lockResult = await studios.updateOne(
+          {
+            _id: studio._id,
+            status: { $in: ['active', 'published'] },
+          },
+          { $inc: { bookingRevision: 1 } },
+          { session },
+        );
+        if (lockResult.matchedCount !== 1) {
+          throw bookingError(409, 'This studio is no longer available');
+        }
+
+        const overlap = await bookings.findOne(
+          {
+            studioId,
+            bookingDate: bookingDetails.bookingDate,
+            status: { $in: BOOKING_OVERLAP_STATUSES },
+            startTime: { $lt: bookingDetails.endTime },
+            endTime: { $gt: bookingDetails.startTime },
+          },
+          { session },
+        );
+        if (overlap) {
+          throw bookingError(409, 'This studio already has a booking during that time');
+        }
+
+        const now = new Date();
+        createdBooking = {
+          _id: new ObjectId(),
+          ...bookingDetails,
+          renterId: req.userId,
+          userId: req.userId,
+          renterName: cleanText(req.authUser.name) || cleanText(req.authUser.email) || 'Renter',
+          status: 'Pending',
+          createdAt: now,
+          updatedAt: now,
+        };
+        await bookings.insertOne(createdBooking, { session });
+
+        const bookingDate = formatBookingNotificationDate(createdBooking);
+        await insertNotification(
+          bookingDetails.ownerId,
+          {
+            type: 'request',
+            title: 'New booking request',
+            body: `${createdBooking.renterName} requested ${createdBooking.studioName} for ${bookingDate} at ${createdBooking.startTime}.`,
+            href: '/host/bookings-request',
+          },
+          session,
+        );
+        await insertNotification(
+          req.userId,
+          {
+            type: 'booking',
+            title: 'Booking request sent',
+            body: `Your request for ${createdBooking.studioName} on ${bookingDate} at ${createdBooking.startTime} was sent to the host.`,
+            href: '/dashboard/bookings',
+          },
+          session,
+        );
+      });
+
+      return sendSuccess(res, {
+        status: 201,
+        message: 'Booking request sent',
+        data: serializeRecord(createdBooking),
+      });
+    } finally {
+      await session.endSession();
+    }
+  }, 'Failed to create booking'),
+);
+
+/**
+ * PATCH /api/bookings/:id/status
+ * Apply a status transition authorized by the session's renter/host role.
+ */
+app.patch(
+  '/api/bookings/:id/status',
+  requireSession,
+  withBookingErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Booking not found');
+    }
+
+    const nextStatus = req.body?.status;
+    if (typeof nextStatus !== 'string' || !BOOKING_STATUSES.has(nextStatus)) {
+      return sendError(res, 400, 'Booking status is invalid');
+    }
+
+    const bookingId = new ObjectId(req.params.id);
+    const session = client.startSession();
+    let updatedBooking;
+    try {
+      await session.withTransaction(async () => {
+        const current = await bookings.findOne(
+          {
+            _id: bookingId,
+            ...bookingParticipantFilter(req.userId),
+          },
+          { session },
+        );
+        if (!current) throw bookingError(404, 'Booking not found');
+
+        const isHost = current.ownerId === req.userId;
+        const isRenter = current.renterId === req.userId || current.userId === req.userId;
+        const allowedTransition = isHost
+          ? (current.status === 'Pending' && ['Confirmed', 'Rejected'].includes(nextStatus)) ||
+            (current.status === 'Confirmed' && nextStatus === 'Completed')
+          : isRenter &&
+            ['Pending', 'Confirmed'].includes(current.status) &&
+            nextStatus === 'Cancelled';
+
+        if (!allowedTransition) {
+          throw bookingError(
+            isHost || isRenter ? 409 : 403,
+            'This booking cannot be changed to that status',
+          );
+        }
+
+        if (isHost && nextStatus === 'Confirmed') {
+          if (!isValidObjectId(current.studioId)) {
+            throw bookingError(409, 'This studio is no longer available');
+          }
+
+          const studioObjectId = new ObjectId(current.studioId);
+          const lockResult = await studios.updateOne(
+            {
+              _id: studioObjectId,
+              ownerId: req.userId,
+              status: { $in: ['active', 'published'] },
+            },
+            { $inc: { bookingRevision: 1 } },
+            { session },
+          );
+          if (lockResult.matchedCount !== 1) {
+            throw bookingError(409, 'This studio is no longer available');
+          }
+
+          const overlap = await bookings.findOne(
+            {
+              _id: { $ne: bookingId },
+              studioId: current.studioId,
+              bookingDate: current.bookingDate,
+              status: { $in: BOOKING_OVERLAP_STATUSES },
+              startTime: { $lt: current.endTime },
+              endTime: { $gt: current.startTime },
+            },
+            { session },
+          );
+          if (overlap) {
+            throw bookingError(409, 'Another active booking overlaps this request');
+          }
+        }
+
+        const now = new Date();
+        const result = await bookings.updateOne(
+          { _id: bookingId, status: current.status },
+          { $set: { status: nextStatus, updatedAt: now } },
+          { session },
+        );
+        if (result.modifiedCount !== 1) {
+          throw bookingError(409, 'This booking has already changed');
+        }
+
+        updatedBooking = {
+          ...current,
+          status: nextStatus,
+          updatedAt: now,
+        };
+
+        const notificationRecipient = isHost ? current.renterId || current.userId : current.ownerId;
+        const studioName = cleanText(current.studioName) || 'your studio';
+        const bookingDate = formatBookingNotificationDate(current);
+        const statusNotification = {
+          Confirmed: {
+            type: 'booking',
+            title: 'Booking confirmed',
+            body: `Your booking for ${studioName} on ${bookingDate} at ${current.startTime} was confirmed.`,
+          },
+          Rejected: {
+            type: 'cancelled',
+            title: 'Booking declined',
+            body: `The host declined your booking for ${studioName} on ${bookingDate}.`,
+          },
+          Completed: {
+            type: 'booking',
+            title: 'Booking completed',
+            body: `Your booking for ${studioName} on ${bookingDate} was marked complete.`,
+          },
+          Cancelled: {
+            type: 'cancelled',
+            title: 'Booking cancelled',
+            body: `${cleanText(current.renterName) || 'The renter'} cancelled the booking for ${studioName} on ${bookingDate}.`,
+          },
+        }[nextStatus];
+
+        await insertNotification(
+          notificationRecipient,
+          {
+            ...statusNotification,
+            href: isHost ? '/dashboard/bookings' : '/host/bookings-request',
+          },
+          session,
+        );
+      });
+
+      return sendSuccess(res, {
+        message: 'Booking updated',
+        data: serializeRecord(updatedBooking),
+      });
+    } finally {
+      await session.endSession();
+    }
+  }, 'Failed to update booking'),
+);
+
+/**
+ * GET /api/reviews/eligibility?studioId=<id>
+ * Return the latest completed, not-yet-reviewed booking for the signed-in user.
+ */
+app.get(
+  '/api/reviews/eligibility',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const studioId = typeof req.query.studioId === 'string' ? req.query.studioId.trim() : '';
+    if (!isValidObjectId(studioId)) {
+      return sendError(res, 400, 'Studio id is invalid');
+    }
+
+    const [studio, completedBookings, existingReviews] = await Promise.all([
+      studios.findOne({ _id: new ObjectId(studioId) }, { projection: { _id: 1 } }),
+      bookings
+        .find({
+          studioId,
+          status: 'Completed',
+          ...renterBookingFilter(req.userId),
+        })
+        .project({ _id: 1, bookingDate: 1, endTime: 1, createdAt: 1 })
+        .sort({ bookingDate: -1, createdAt: -1 })
+        .toArray(),
+      reviews.find({ studioId, userId: req.userId }).project({ bookingId: 1 }).toArray(),
+    ]);
+
+    if (!studio) return sendError(res, 404, 'Studio not found');
+
+    const reviewedBookingIds = new Set(existingReviews.map((review) => review.bookingId));
+    const eligibleBooking = completedBookings.find(
+      (booking) => bookingHasEnded(booking) && !reviewedBookingIds.has(String(booking._id)),
+    );
+
+    return sendSuccess(res, {
+      message: 'Review eligibility loaded',
+      data: {
+        canReview: Boolean(eligibleBooking),
+        bookingId: eligibleBooking ? String(eligibleBooking._id) : null,
+        bookingDate: eligibleBooking?.bookingDate || null,
+      },
+    });
+  }, 'Failed to load review eligibility'),
+);
+
+/**
+ * GET /api/reviews?studioId=<id>
+ * Return public review fields, optionally narrowed to a studio.
+ */
+app.get(
+  '/api/reviews',
+  withApiErrorHandling(async (req, res) => {
+    const studioId = typeof req.query.studioId === 'string' ? req.query.studioId.trim() : '';
+
+    if (studioId.length > 128) {
+      return sendError(res, 400, 'Studio id is too long');
+    }
+
+    const data = await reviews
+      .find(studioId ? { studioId } : {})
+      .sort({ createdAt: -1 })
+      .toArray();
+    return sendSuccess(res, {
+      message: 'Reviews loaded',
+      data: data.map(serializeReview),
+    });
+  }, 'Failed to load reviews'),
+);
+
+/**
+ * POST /api/reviews
+ * Create a review only for a completed booking owned by the session user.
+ */
+app.post(
+  '/api/reviews',
+  requireSession,
+  withBookingErrorHandling(
+    async (req, res) => {
+      const studioId = typeof req.body?.studioId === 'string' ? req.body.studioId.trim() : '';
+      const bookingId = typeof req.body?.bookingId === 'string' ? req.body.bookingId.trim() : '';
+      const rating = req.body?.rating;
+      const comment = cleanText(req.body?.comment);
+
+      if (!isValidObjectId(studioId) || !isValidObjectId(bookingId)) {
+        return sendError(res, 400, 'Studio or booking id is invalid');
+      }
+      if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+        return sendError(res, 400, 'Choose a rating from 1 to 5 stars');
+      }
+      if (!comment || comment.length > REVIEW_COMMENT_MAX_LENGTH) {
+        return sendError(
+          res,
+          400,
+          `Review text must be between 1 and ${REVIEW_COMMENT_MAX_LENGTH} characters`,
+        );
+      }
+
+      const session = client.startSession();
+      let createdReview;
+      try {
+        await session.withTransaction(async () => {
+          const completedBooking = await bookings.findOne(
+            {
+              _id: new ObjectId(bookingId),
+              studioId,
+              status: 'Completed',
+              ...renterBookingFilter(req.userId),
+            },
+            {
+              session,
+              projection: { _id: 1, bookingDate: 1, endTime: 1 },
+            },
+          );
+          if (!completedBooking) {
+            throw bookingError(
+              403,
+              'A completed booking for this studio is required to leave a review',
+            );
+          }
+          if (!bookingHasEnded(completedBooking)) {
+            throw bookingError(403, 'Reviews are available after the booking has ended');
+          }
+
+          const studio = await studios.findOne({ _id: new ObjectId(studioId) }, { session });
+          if (!studio) throw bookingError(404, 'Studio not found');
+
+          const now = new Date();
+          createdReview = {
+            _id: new ObjectId(),
+            studioId,
+            bookingId,
+            userId: req.userId,
+            reviewerName: cleanText(req.authUser.name).slice(0, 80) || 'SetSpace user',
+            rating,
+            comment,
+            createdAt: now,
+            updatedAt: now,
+          };
+          await reviews.insertOne(createdReview, { session });
+
+          const reviewCount = Number(studio.reviewCount) || 0;
+          const storedRatingTotal = Number(studio.ratingTotal);
+          const previousRatingTotal = Number.isFinite(storedRatingTotal)
+            ? storedRatingTotal
+            : (Number(studio.rating) || 0) * reviewCount;
+          const nextReviewCount = reviewCount + 1;
+          const nextRatingTotal = previousRatingTotal + rating;
+          const nextRating = Math.round((nextRatingTotal / nextReviewCount) * 10) / 10;
+
+          await studios.updateOne(
+            { _id: studio._id },
+            {
+              $set: {
+                rating: nextRating,
+                reviewCount: nextReviewCount,
+                ratingTotal: nextRatingTotal,
+                updatedAt: now,
+              },
+            },
+            { session },
+          );
+
+          await insertNotification(
+            studio.ownerId,
+            {
+              type: 'review',
+              title: `New ${rating}-star review`,
+              body: `${createdReview.reviewerName} left a review for ${cleanText(studio.name) || 'your studio'}.`,
+              href: `/explore-studio/${studioId}#reviews`,
+            },
+            session,
+          );
+        });
+
+        return sendSuccess(res, {
+          status: 201,
+          message: 'Review posted',
+          data: serializeReview(createdReview),
+        });
+      } finally {
+        await session.endSession();
+      }
+    },
+    'Failed to create review',
+    'A review has already been posted for this booking',
+  ),
+);
+
+/* ------------------------------------------------------------------ */
+/* 7. Notifications API                                                */
+/* ------------------------------------------------------------------ */
+
+app.get(
+  '/api/notifications',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const data = await notifications.find({ userId: req.userId }).sort({ createdAt: -1 }).toArray();
+    return sendSuccess(res, {
+      message: 'Notifications loaded',
+      data: data.map(serializeNotification),
+    });
+  }, 'Failed to load notifications'),
+);
+
+app.patch(
+  '/api/notifications/read-all',
+  requireSession,
+  withApiErrorHandling(
+    async (req, res) => {
+      const result = await notifications.updateMany(
+        { userId: req.userId, isRead: { $ne: true } },
+        { $set: { isRead: true, readAt: new Date() } },
+      );
+      return sendSuccess(res, {
+        message: 'Notifications marked as read',
+        data: { updated: result.modifiedCount },
+      });
+    },
+    'Failed to update notifications',
+    {
+      logMessage: 'Failed to mark all notifications as read:',
+    },
+  ),
+);
+
+app.patch(
+  '/api/notifications/:id/read',
+  requireSession,
+  withApiErrorHandling(
+    async (req, res) => {
+      if (!isValidObjectId(req.params.id)) {
+        return sendError(res, 404, 'Notification not found');
+      }
+
+      const result = await notifications.updateOne(
+        { _id: new ObjectId(req.params.id), userId: req.userId },
+        { $set: { isRead: true, readAt: new Date() } },
+      );
+      if (!result.matchedCount) {
+        return sendError(res, 404, 'Notification not found');
+      }
+
+      return sendSuccess(res, { message: 'Notification marked as read' });
+    },
+    'Failed to update notification',
+    {
+      logMessage: 'Failed to mark notification as read:',
+    },
+  ),
+);
+
+app.delete(
+  '/api/notifications/:id',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 404, 'Notification not found');
+    }
+
+    const result = await notifications.deleteOne({
+      _id: new ObjectId(req.params.id),
+      userId: req.userId,
+    });
+    if (!result.deletedCount) {
+      return sendError(res, 404, 'Notification not found');
+    }
+    return sendSuccess(res, { message: 'Notification deleted' });
+  }, 'Failed to delete notification'),
+);
+
+/* ------------------------------------------------------------------ */
+/* 8. User Profile API                                                 */
 /* ------------------------------------------------------------------ */
 
 /**
  * GET /api/profile
  * Return the signed-in user's profile, auth user and account stats.
  */
-app.get('/api/profile', requireSession, async (req, res) => {
-  try {
-    let profile = await userProfiles.findOne({ userId: req.userId });
+app.get(
+  '/api/profile',
+  requireSession,
+  withProfileErrorHandling(
+    async (req, res) => {
+      let profile = await findProfile(req.userId);
 
-    if (!profile) {
-      return res.status(404).json({
-        error: 'Profile not found',
-        code: 'PROFILE_NOT_FOUND',
+      if (!profile) {
+        return sendProfileError(res, 404, 'Profile not found', 'PROFILE_NOT_FOUND');
+      }
+
+      // Email belongs to Better Auth. Keep the profile copy in sync with the
+      // verified session instead of trusting a stored email.
+      const email = cleanText(req.authUser.email);
+      if (email && profile.email !== email) {
+        await userProfiles.updateOne(
+          { _id: profile._id },
+          { $set: { email, updatedAt: new Date() } },
+        );
+        profile = { ...profile, email };
+      }
+
+      const stats = await getProfileStats(req.userId, req.authUser);
+
+      return res.json({
+        profile: serializeProfile(profile, req.authUser),
+        user: serializeUser(req.authUser),
+        stats,
       });
-    }
+    },
+    'Failed to get profile:',
+    'Failed to load your profile',
+    'PROFILE_LOAD_FAILED',
+  ),
+);
 
-    // Email belongs to Better Auth. Keep the profile copy in sync with the
-    // verified session instead of trusting a stored email.
-    const email = cleanText(req.authUser.email);
-    if (email && profile.email !== email) {
-      await userProfiles.updateOne(
-        { _id: profile._id },
-        { $set: { email, updatedAt: new Date() } }
+/**
+ * GET /api/profile/image
+ * Return the signed-in user's stored profile image.
+ */
+app.get(
+  '/api/profile/image',
+  requireSession,
+  withProfileErrorHandling(
+    async (req, res) => {
+      const profile = await userProfiles.findOne(
+        { userId: req.userId },
+        { projection: { imageData: 1, imageContentType: 1 } },
       );
-      profile = { ...profile, email };
-    }
 
-    const stats = await getProfileStats(req.userId, req.authUser);
+      if (typeof profile?.imageData !== 'string' || !profile.imageData) {
+        return sendProfileError(res, 404, 'Profile image not found', 'PROFILE_IMAGE_NOT_FOUND');
+      }
 
-    return res.json({
-      profile: serializeProfile(profile, req.authUser),
-      user: serializeUser(req.authUser),
-      stats,
-    });
-  } catch (error) {
-    console.error('Failed to get profile:', error);
-    return res.status(500).json({
-      error: 'Failed to load your profile',
-      code: 'PROFILE_LOAD_FAILED',
-    });
-  }
-});
+      const image = Buffer.from(profile.imageData, 'base64');
+      const normalizedImage = normalizeImageBuffer(image);
+      if (!normalizedImage || image.length > PROFILE_IMAGE_MAX_BYTES) {
+        return sendProfileError(res, 404, 'Profile image not found', 'PROFILE_IMAGE_NOT_FOUND');
+      }
+
+      res.set({
+        'Cache-Control': 'private, no-store',
+        'Content-Length': String(normalizedImage.buffer.length),
+        'Content-Type': normalizedImage.contentType,
+        'X-Content-Type-Options': 'nosniff',
+      });
+      if (normalizedImage.contentType === 'image/svg+xml') {
+        res.set('Content-Security-Policy', "default-src 'none'; sandbox");
+      }
+      return res.send(normalizedImage.buffer);
+    },
+    'Failed to load profile image:',
+    'Failed to load your profile image',
+    'PROFILE_IMAGE_LOAD_FAILED',
+  ),
+);
+
+/**
+ * PUT /api/profile/image
+ * Persist a validated image with the signed-in user's profile.
+ */
+app.put(
+  '/api/profile/image',
+  requireSession,
+  handleProfileImageBody,
+  withProfileErrorHandling(
+    async (req, res) => {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return sendProfileError(
+          res,
+          400,
+          'A profile image file is required',
+          'PROFILE_IMAGE_REQUIRED',
+        );
+      }
+
+      if (req.body.length > PROFILE_IMAGE_MAX_BYTES) {
+        return sendProfileError(
+          res,
+          413,
+          'Profile image must be 1 MB or smaller',
+          'PROFILE_IMAGE_TOO_LARGE',
+        );
+      }
+
+      const normalizedImage = normalizeImageBuffer(req.body);
+      if (!normalizedImage) {
+        return sendProfileError(
+          res,
+          415,
+          'Use a valid JPEG, PNG, WebP, GIF or SVG profile image',
+          'INVALID_PROFILE_IMAGE',
+        );
+      }
+
+      const now = new Date();
+      const update = {
+        $set: {
+          email: cleanText(req.authUser.email),
+          image: '/api/profile/image',
+          imageData: normalizedImage.buffer.toString('base64'),
+          imageContentType: normalizedImage.contentType,
+          imageUpdatedAt: now,
+          imageVersion: new ObjectId().toString(),
+          updatedAt: now,
+        },
+        $setOnInsert: {
+          userId: req.userId,
+          name: nameFromSession(req.authUser),
+          createdAt: now,
+        },
+      };
+
+      let created = false;
+      try {
+        const result = await userProfiles.updateOne({ userId: req.userId }, update, {
+          upsert: true,
+        });
+        created = result.upsertedCount > 0;
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+        await userProfiles.updateOne({ userId: req.userId }, update);
+      }
+
+      const profile = await findProfile(req.userId);
+      return res.status(created ? 201 : 200).json({
+        profile: serializeProfile(profile, req.authUser),
+        created,
+      });
+    },
+    'Failed to save profile image:',
+    'Failed to save your profile image',
+    'PROFILE_IMAGE_SAVE_FAILED',
+  ),
+);
 
 /**
  * POST /api/profile
  * Create the profile if it does not exist. Safe to call more than once:
  * the unique userId index plus this upsert prevent duplicates.
  */
-app.post('/api/profile', requireSession, async (req, res) => {
-  try {
-    const { errors, values } = validateProfileBody(req.body ?? {}, {
-      allowEmpty: true,
-    });
-
-    if (errors.length) {
-      return res.status(400).json({
-        error: errors[0],
-        errors,
-        code: 'VALIDATION_ERROR',
+app.post(
+  '/api/profile',
+  requireSession,
+  withProfileErrorHandling(
+    async (req, res) => {
+      const { errors, values } = validateProfileBody(req.body ?? {}, {
+        allowEmpty: true,
       });
-    }
 
-    const existing = await userProfiles.findOne({ userId: req.userId });
-    if (existing) {
-      return res.json({
-        profile: serializeProfile(existing, req.authUser),
-        created: false,
-      });
-    }
+      if (errors.length) {
+        return sendProfileError(res, 400, errors[0], 'VALIDATION_ERROR', {
+          errors,
+        });
+      }
 
-    const now = new Date();
-    const document = {
-      userId: req.userId,
-      name: values.name ?? nameFromSession(req.authUser),
-      email: cleanText(req.authUser.email),
-      image:
-        values.image === ''
-          ? null
-          : values.image ?? req.authUser.image ?? null,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    for (const field of ['phone', 'location', 'bio']) {
-      if (values[field]) document[field] = values[field];
-    }
-
-    try {
-      await userProfiles.insertOne(document);
-
-      return res.status(201).json({
-        profile: serializeProfile(document, req.authUser),
-        created: true,
-      });
-    } catch (error) {
-      // A concurrent request created it first. Return that profile instead
-      // of producing a duplicate or a confusing error.
-      if (error?.code === 11000) {
-        const profile = await userProfiles.findOne({ userId: req.userId });
-
+      const existing = await findProfile(req.userId);
+      if (existing) {
         return res.json({
-          profile: serializeProfile(profile, req.authUser),
+          profile: serializeProfile(existing, req.authUser),
           created: false,
         });
       }
 
-      throw error;
-    }
-  } catch (error) {
-    console.error('Failed to create profile:', error);
-    return res.status(500).json({
-      error: 'Failed to create your profile',
-      code: 'PROFILE_CREATE_FAILED',
-    });
-  }
-});
+      const now = new Date();
+      const document = {
+        userId: req.userId,
+        name: values.name ?? nameFromSession(req.authUser),
+        email: cleanText(req.authUser.email),
+        image: values.image === '' ? null : (values.image ?? req.authUser.image ?? null),
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      for (const field of ['phone', 'location', 'bio']) {
+        if (values[field]) document[field] = values[field];
+      }
+
+      try {
+        await userProfiles.insertOne(document);
+
+        return res.status(201).json({
+          profile: serializeProfile(document, req.authUser),
+          created: true,
+        });
+      } catch (error) {
+        // A concurrent request created it first. Return that profile instead
+        // of producing a duplicate or a confusing error.
+        if (error?.code === 11000) {
+          const profile = await findProfile(req.userId);
+
+          return res.json({
+            profile: serializeProfile(profile, req.authUser),
+            created: false,
+          });
+        }
+
+        throw error;
+      }
+    },
+    'Failed to create profile:',
+    'Failed to create your profile',
+    'PROFILE_CREATE_FAILED',
+  ),
+);
 
 /**
  * PATCH /api/profile (and PUT for clients that prefer it)
  * Update existing fields, fill empty fields, or clear a field by sending an
  * empty string. Creates the profile if it is missing.
  */
-async function updateProfileHandler(req, res) {
-  try {
+const updateProfileHandler = withProfileErrorHandling(
+  async (req, res) => {
     const { errors, values } = validateProfileBody(req.body ?? {});
 
     if (errors.length) {
-      return res.status(400).json({
-        error: errors[0],
+      return sendProfileError(res, 400, errors[0], 'VALIDATION_ERROR', {
         errors,
-        code: 'VALIDATION_ERROR',
       });
     }
 
@@ -853,22 +3072,17 @@ async function updateProfileHandler(req, res) {
       result = await userProfiles.updateOne({ userId: req.userId }, update);
     }
 
-    const profile = await userProfiles.findOne({ userId: req.userId });
+    const profile = await findProfile(req.userId);
 
-    return res
-      .status(result.upsertedCount > 0 ? 201 : 200)
-      .json({
-        profile: serializeProfile(profile, req.authUser),
-        created: result.upsertedCount > 0,
-      });
-  } catch (error) {
-    console.error('Failed to update profile:', error);
-    return res.status(500).json({
-      error: 'Failed to update your profile',
-      code: 'PROFILE_UPDATE_FAILED',
+    return res.status(result.upsertedCount > 0 ? 201 : 200).json({
+      profile: serializeProfile(profile, req.authUser),
+      created: result.upsertedCount > 0,
     });
-  }
-}
+  },
+  'Failed to update profile:',
+  'Failed to update your profile',
+  'PROFILE_UPDATE_FAILED',
+);
 
 app.patch('/api/profile', requireSession, updateProfileHandler);
 app.put('/api/profile', requireSession, updateProfileHandler);
@@ -878,22 +3092,22 @@ app.put('/api/profile', requireSession, updateProfileHandler);
  * Delete the SetSpace profile document only. Better Auth's user, session,
  * account and verification collections are never touched.
  */
-app.delete('/api/profile', requireSession, async (req, res) => {
-  try {
-    const result = await userProfiles.deleteOne({ userId: req.userId });
-
-    return res.json({
-      success: true,
-      deleted: result.deletedCount > 0,
-    });
-  } catch (error) {
-    console.error('Failed to delete profile:', error);
-    return res.status(500).json({
-      error: 'Failed to delete your profile',
-      code: 'PROFILE_DELETE_FAILED',
-    });
-  }
-});
+app.delete(
+  '/api/profile',
+  requireSession,
+  withProfileErrorHandling(
+    async (req, res) => {
+      const result = await userProfiles.deleteOne({ userId: req.userId });
+      return res.json({
+        success: true,
+        deleted: result.deletedCount > 0,
+      });
+    },
+    'Failed to delete profile:',
+    'Failed to delete your profile',
+    'PROFILE_DELETE_FAILED',
+  ),
+);
 
 /**
  * DELETE /api/profile/fields/:field
@@ -901,96 +3115,93 @@ app.delete('/api/profile', requireSession, async (req, res) => {
  * Name and email are intentionally not deletable: the name is required and
  * email is owned by Better Auth.
  */
-app.delete('/api/profile/fields/:field', requireSession, async (req, res) => {
-  try {
-    const field = String(req.params.field || '').toLowerCase();
+app.delete(
+  '/api/profile/fields/:field',
+  requireSession,
+  withProfileErrorHandling(
+    async (req, res) => {
+      const field = String(req.params.field || '').toLowerCase();
 
-    if (!DELETABLE_FIELDS.has(field)) {
-      return res.status(400).json({
-        error: `Field must be one of: ${[...DELETABLE_FIELDS].join(', ')}`,
-        code: 'INVALID_FIELD',
-      });
-    }
-
-    const result = await userProfiles.updateOne(
-      { userId: req.userId },
-      {
-        $unset: { [field]: '' },
-        $set: { updatedAt: new Date() },
+      if (!DELETABLE_FIELDS.has(field)) {
+        return sendProfileError(
+          res,
+          400,
+          `Field must be one of: ${[...DELETABLE_FIELDS].join(', ')}`,
+          'INVALID_FIELD',
+        );
       }
-    );
 
-    if (!result.matchedCount) {
-      return res.status(404).json({
-        error: 'Profile not found',
-        code: 'PROFILE_NOT_FOUND',
-      });
-    }
+      const unset = { [field]: '' };
+      if (field === 'image') {
+        clearProfileImageFields(unset);
+      }
 
-    const profile = await userProfiles.findOne({ userId: req.userId });
+      const result = await userProfiles.updateOne(
+        { userId: req.userId },
+        {
+          $unset: unset,
+          $set: { updatedAt: new Date() },
+        },
+      );
 
-    return res.json({
-      profile: serializeProfile(profile, req.authUser),
-    });
-  } catch (error) {
-    console.error('Failed to clear profile field:', error);
-    return res.status(500).json({
-      error: 'Failed to clear this profile field',
-      code: 'PROFILE_FIELD_DELETE_FAILED',
-    });
-  }
-});
+      if (!result.matchedCount) {
+        return sendProfileError(res, 404, 'Profile not found', 'PROFILE_NOT_FOUND');
+      }
+
+      const profile = await findProfile(req.userId);
+      return res.json({ profile: serializeProfile(profile, req.authUser) });
+    },
+    'Failed to clear profile field:',
+    'Failed to clear this profile field',
+    'PROFILE_FIELD_DELETE_FAILED',
+  ),
+);
 
 /* ------------------------------------------------------------------ */
-/* 7. Existing account route                                           */
+/* 8. Existing account route                                           */
 /* ------------------------------------------------------------------ */
 
 // Get the signed-in user's Better Auth account. `/users/me` is supported as
 // a convenience, and a real id is only accepted when it belongs to the
 // caller. Profile data is served by /api/profile.
-app.get('/users/:id', requireSession, async (req, res) => {
-  try {
-    const requestedId = req.params.id === 'me' ? req.userId : req.params.id;
+app.get(
+  '/users/:id',
+  requireSession,
+  withProfileErrorHandling(
+    async (req, res) => {
+      const requestedId = req.params.id === 'me' ? req.userId : req.params.id;
 
-    if (requestedId !== req.userId) {
-      return res.status(403).json({
-        error: 'You can only access your own account',
-        code: 'FORBIDDEN',
+      if (requestedId !== req.userId) {
+        return sendProfileError(res, 403, 'You can only access your own account', 'FORBIDDEN');
+      }
+
+      const query = ObjectId.isValid(requestedId)
+        ? { _id: new ObjectId(requestedId) }
+        : { _id: requestedId };
+
+      const user = await authUsers.findOne(query);
+
+      if (!user) {
+        return sendProfileError(res, 404, 'User not found', 'USER_NOT_FOUND');
+      }
+
+      return res.json({
+        id: String(user._id),
+        name: user.name ?? '',
+        email: user.email ?? '',
+        image: user.image ?? null,
+        emailVerified: Boolean(user.emailVerified),
+        createdAt: user.createdAt ?? null,
       });
-    }
-
-    const query = ObjectId.isValid(requestedId)
-      ? { _id: new ObjectId(requestedId) }
-      : { _id: requestedId };
-
-    const user = await authUsers.findOne(query);
-
-    if (!user) {
-      return res.status(404).json({
-        error: 'User not found',
-        code: 'USER_NOT_FOUND',
-      });
-    }
-
-    return res.json({
-      id: String(user._id),
-      name: user.name ?? '',
-      email: user.email ?? '',
-      image: user.image ?? null,
-      emailVerified: Boolean(user.emailVerified),
-      createdAt: user.createdAt ?? null,
-    });
-  } catch (error) {
-    console.error('Error fetching user:', error);
-    return res.status(500).json({
-      error: 'Internal Server Error',
-      code: 'USER_LOAD_FAILED',
-    });
-  }
-});
+    },
+    'Error fetching user:',
+    'Internal Server Error',
+    'USER_LOAD_FAILED',
+  ),
+);
 
 /* ------------------------------------------------------------------ */
-/* 8. Health route and error handling                                  */
+/* 9. Health route and error handling                                  */
 /* ------------------------------------------------------------------ */
 
 app.get('/', (req, res) => {
@@ -1009,19 +3220,14 @@ app.get('/api/health', async (req, res) => {
       setSpaceDb.command({ ping: 1 }),
     ]);
 
-    const setSpaceNames = (
-      await setSpaceDb.listCollections({}, { nameOnly: true }).toArray()
-    ).map((collection) => collection.name);
-
-    const missing = APPLICATION_COLLECTIONS.filter(
-      (name) => !setSpaceNames.includes(name)
+    const setSpaceNames = (await setSpaceDb.listCollections({}, { nameOnly: true }).toArray()).map(
+      (collection) => collection.name,
     );
 
+    const missing = APPLICATION_COLLECTIONS.filter((name) => !setSpaceNames.includes(name));
+
     const healthy =
-      authPing?.ok === 1 &&
-      setSpacePing?.ok === 1 &&
-      databaseReady &&
-      missing.length === 0;
+      authPing?.ok === 1 && setSpacePing?.ok === 1 && databaseReady && missing.length === 0;
 
     if (!healthy) {
       return sendError(res, 503, 'Database foundation is not ready');
@@ -1079,6 +3285,6 @@ app.listen(port, () => {
   console.log(`SetSpace API listening on port ${port}`);
   console.log(`Better Auth session verification: ${SESSION_ENDPOINT}`);
   console.log(
-    `Profile storage: ${SETSPACE_DB_NAME}.${USER_PROFILES_COLLECTION} (auth data stays in ${AUTH_DB_NAME})`
+    `Profile storage: ${SETSPACE_DB_NAME}.${USER_PROFILES_COLLECTION} (auth data stays in ${AUTH_DB_NAME})`,
   );
 });
