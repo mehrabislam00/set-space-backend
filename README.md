@@ -185,7 +185,7 @@ MONGODB_USERNAME=YOUR_MONGODB_USERNAME
 MONGODB_PASSWORD=YOUR_MONGODB_PASSWORD
 
 # Comma-separated frontend origins allowed by CORS
-CLIENT_URI=http://localhost:3000
+CLIENT_URI=http://localhost:3000,https://set-space-five.vercel.app
 
 # Base URL of the Next.js app running Better Auth
 BETTER_AUTH_URL=http://localhost:3000
@@ -245,10 +245,11 @@ node index.js
 
 Configure the deployment environment with MongoDB credentials, the platform's
 `PORT`, the production frontend origin(s) in `CLIENT_URI`, and the frontend
-Better Auth base URL in `BETTER_AUTH_URL`. Ensure the API can reach both
-MongoDB and the deployed Next.js authentication endpoint. Configure the
-frontend's `NEXT_PUBLIC_API_URL` to the deployed API base URL and use HTTPS
-origins in production.
+Better Auth base URL in `BETTER_AUTH_URL`. For this deployment, set
+`CLIENT_URI` to `https://set-space-five.vercel.app` and `BETTER_AUTH_URL` to
+the same URL. Ensure the API can reach both MongoDB and the deployed Next.js
+authentication endpoint. Configure the frontend's `NEXT_PUBLIC_API_URL` to
+the deployed API base URL and use HTTPS origins in production.
 
 No automated test suite is configured yet; the `test` script in
 `package.json` is a placeholder.

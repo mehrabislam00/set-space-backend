@@ -108,10 +108,15 @@ function getOrigin(url) {
 // frontend origin that Better Auth itself is configured with.
 const AUTH_ORIGIN = getOrigin(AUTH_BASE_URL);
 
-const allowedOrigins = (process.env.CLIENT_URI || 'http://localhost:3000,http://127.0.0.1:3000')
-  .split(',')
-  .map((origin) => origin.trim().replace(/\/+$/, ''))
-  .filter(Boolean);
+const allowedOrigins = [
+  ...new Set([
+    ...(process.env.CLIENT_URI || 'http://localhost:3000,http://127.0.0.1:3000')
+      .split(',')
+      .map((origin) => origin.trim().replace(/\/+$/, ''))
+      .filter(Boolean),
+    'https://set-space-five.vercel.app',
+  ]),
+];
 
 /* ------------------------------------------------------------------ */
 /* 2. Express middleware                                               */
