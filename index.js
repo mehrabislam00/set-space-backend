@@ -11,16 +11,23 @@ const port = Number(process.env.PORT) || 5000;
 /* 1. Configuration                                                    */
 /* ------------------------------------------------------------------ */
 
-const username = process.env.MONGODB_USERNAME;
-const password = process.env.MONGODB_PASSWORD;
+const mongoUri = process.env.MONGODB_URI?.trim();
+let resolvedMongoUri = mongoUri;
 
-if (!username || !password) {
-  throw new Error('MONGODB_USERNAME and MONGODB_PASSWORD must be configured');
+if (!resolvedMongoUri) {
+  const username = process.env.MONGODB_USERNAME;
+  const password = process.env.MONGODB_PASSWORD;
+
+  if (!username || !password) {
+    throw new Error(
+      'MONGODB_URI or MONGODB_USERNAME and MONGODB_PASSWORD must be configured',
+    );
+  }
+
+  // Better Auth and this API share the same cluster. Authentication data
+  // stays in the `auth` database; application data stays in `SetSpace`.
+  resolvedMongoUri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@ac-tikzacb-shard-00-00.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-01.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-02.rbwczib.mongodb.net:27017/?ssl=true&replicaSet=atlas-11uhlz-shard-0&authSource=admin`;
 }
-
-// Better Auth and this API share the same cluster. Authentication data
-// stays in the `auth` database; application data stays in `SetSpace`.
-const mongoUri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@ac-tikzacb-shard-00-00.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-01.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-02.rbwczib.mongodb.net:27017/?ssl=true&replicaSet=atlas-11uhlz-shard-0&authSource=admin`;
 
 const AUTH_DB_NAME = process.env.AUTH_DB_NAME?.trim() || 'auth';
 const SETSPACE_DB_NAME = process.env.SETSPACE_DB_NAME?.trim() || 'SetSpace';
@@ -210,7 +217,7 @@ function handleProfileImageBody(req, res, next) {
 /* 3. MongoDB connection                                               */
 /* ------------------------------------------------------------------ */
 
-const client = new MongoClient(mongoUri);
+const client = new MongoClient(resolvedMongoUri);
 
 export async function connectToMongoDB() {
   try {
@@ -3214,12 +3221,14 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`SetSpace API listening on port ${port}`);
-  console.log(`Better Auth session verification: ${SESSION_ENDPOINT}`);
-  console.log(
-    `Profile storage: ${SETSPACE_DB_NAME}.${USER_PROFILES_COLLECTION} (auth data stays in ${AUTH_DB_NAME})`,
-  );
-});
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`SetSpace API listening on port ${port}`);
+    console.log(`Better Auth session verification: ${SESSION_ENDPOINT}`);
+    console.log(
+      `Profile storage: ${SETSPACE_DB_NAME}.${USER_PROFILES_COLLECTION} (auth data stays in ${AUTH_DB_NAME})`,
+    );
+  });
+}
 
 export default app;
