@@ -11,22 +11,20 @@ const port = Number(process.env.PORT) || 5000;
 /* 1. Configuration                                                    */
 /* ------------------------------------------------------------------ */
 
-const mongoUri = process.env.MONGODB_URI?.trim();
-let resolvedMongoUri = mongoUri;
+const username = process.env.MONGODB_USERNAME;
+const password = process.env.MONGODB_PASSWORD;
+let resolvedMongoUri = process.env.MONGODB_URI?.trim();
+
+if (username && password) {
+  // Prefer the deployed credential pair because it keeps the known Atlas
+  // cluster and avoids stale or placeholder MONGODB_URI values.
+  resolvedMongoUri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@ac-tikzacb-shard-00-00.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-01.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-02.rbwczib.mongodb.net:27017/?ssl=true&replicaSet=atlas-11uhlz-shard-0&authSource=admin`;
+}
 
 if (!resolvedMongoUri) {
-  const username = process.env.MONGODB_USERNAME;
-  const password = process.env.MONGODB_PASSWORD;
-
-  if (!username || !password) {
-    throw new Error(
-      'MONGODB_URI or MONGODB_USERNAME and MONGODB_PASSWORD must be configured',
-    );
-  }
-
-  // Better Auth and this API share the same cluster. Authentication data
-  // stays in the `auth` database; application data stays in `SetSpace`.
-  resolvedMongoUri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@ac-tikzacb-shard-00-00.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-01.rbwczib.mongodb.net:27017,ac-tikzacb-shard-00-02.rbwczib.mongodb.net:27017/?ssl=true&replicaSet=atlas-11uhlz-shard-0&authSource=admin`;
+  throw new Error(
+    'MONGODB_URI or MONGODB_USERNAME and MONGODB_PASSWORD must be configured',
+  );
 }
 
 const AUTH_DB_NAME = process.env.AUTH_DB_NAME?.trim() || 'auth';
@@ -217,7 +215,9 @@ function handleProfileImageBody(req, res, next) {
 /* 3. MongoDB connection                                               */
 /* ------------------------------------------------------------------ */
 
-const client = new MongoClient(resolvedMongoUri);
+const client = new MongoClient(resolvedMongoUri, {
+  serverSelectionTimeoutMS: 10_000,
+});
 
 export async function connectToMongoDB() {
   try {
@@ -230,10 +230,8 @@ export async function connectToMongoDB() {
   }
 }
 
-const ConnectedClient = await connectToMongoDB();
-
-const setSpaceDb = ConnectedClient.db(SETSPACE_DB_NAME);
-const authDb = ConnectedClient.db(AUTH_DB_NAME);
+let setSpaceDb = null;
+let authDb = null;
 
 /**
  * Application collections live only in SetSpace. Better Auth owns `user`,
@@ -255,17 +253,17 @@ const APPLICATION_COLLECTIONS = [
   'newsletterSubscribers',
 ];
 
-const userProfiles = setSpaceDb.collection(USER_PROFILES_COLLECTION);
-const studios = setSpaceDb.collection('studios');
-const bookings = setSpaceDb.collection('bookings');
-const reviews = setSpaceDb.collection('reviews');
-const wishlists = setSpaceDb.collection('wishlists');
-const notifications = setSpaceDb.collection('notifications');
-const contactMessages = setSpaceDb.collection('contactMessages');
-const newsletterSubscribers = setSpaceDb.collection('newsletterSubscribers');
+let userProfiles = null;
+let studios = null;
+let bookings = null;
+let reviews = null;
+let wishlists = null;
+let notifications = null;
+let contactMessages = null;
+let newsletterSubscribers = null;
 
 // Better Auth data (auth database). Read-only here: Better Auth owns it.
-const authUsers = authDb.collection('user');
+let authUsers = null;
 
 /** True only for a 24-character hex ObjectId string. */
 function isValidObjectId(value) {
@@ -537,6 +535,7 @@ async function retireStaleIndexes() {
 }
 
 let databaseReady = false;
+let mongoInitializationPromise = null;
 
 async function setupDatabases() {
   const [authPing, setSpacePing] = await Promise.all([
@@ -570,11 +569,41 @@ async function setupDatabases() {
   );
 }
 
-try {
-  await setupDatabases();
-} catch (error) {
-  console.error('Database foundation setup failed:', error?.message || 'Database setup failed');
+export async function ensureMongoReady() {
+  if (databaseReady) return client;
+
+  if (!mongoInitializationPromise) {
+    mongoInitializationPromise = (async () => {
+      const connectedClient = await connectToMongoDB();
+      setSpaceDb = connectedClient.db(SETSPACE_DB_NAME);
+      authDb = connectedClient.db(AUTH_DB_NAME);
+      authUsers = authDb.collection('user');
+
+      userProfiles = setSpaceDb.collection(USER_PROFILES_COLLECTION);
+      studios = setSpaceDb.collection('studios');
+      bookings = setSpaceDb.collection('bookings');
+      reviews = setSpaceDb.collection('reviews');
+      wishlists = setSpaceDb.collection('wishlists');
+      notifications = setSpaceDb.collection('notifications');
+      contactMessages = setSpaceDb.collection('contactMessages');
+      newsletterSubscribers = setSpaceDb.collection('newsletterSubscribers');
+
+      await setupDatabases();
+      return connectedClient;
+    })().catch((error) => {
+      mongoInitializationPromise = null;
+      console.error(
+        'Database foundation setup failed:',
+        error?.message || 'Database setup failed',
+      );
+      throw error;
+    });
+  }
+
+  return mongoInitializationPromise;
 }
+
+void ensureMongoReady().catch(() => {});
 
 /* ------------------------------------------------------------------ */
 /* 4. Authentication                                                   */
@@ -1606,6 +1635,15 @@ function serializeStudio(document, { includePrivate = false } = {}) {
 /* ------------------------------------------------------------------ */
 /* 6. Marketplace read APIs                                            */
 /* ------------------------------------------------------------------ */
+
+app.use('/api', async (req, res, next) => {
+  try {
+    await ensureMongoReady();
+    next();
+  } catch {
+    return sendError(res, 503, 'Database foundation is not ready');
+  }
+});
 
 app.post(
   '/api/contact',

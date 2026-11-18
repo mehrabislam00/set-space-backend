@@ -199,8 +199,8 @@ SETSPACE_DB_NAME=SetSpace
 # AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
 ```
 
-`MONGODB_URI` is preferred. If it is not set, `MONGODB_USERNAME` and
-`MONGODB_PASSWORD` are required. The current backend
+`MONGODB_USERNAME` and `MONGODB_PASSWORD` are used for the current Atlas
+cluster. `MONGODB_URI` is used as a fallback when credentials are not set. The current backend
 constructs its MongoDB connection from these credentials; it does not read a
 `MONGODB_URI` variable. `PORT`, `CLIENT_URI`, `BETTER_AUTH_URL`,
 `AUTH_DB_NAME`, and `SETSPACE_DB_NAME` have code defaults. If changing
