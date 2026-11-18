@@ -1,86 +1,256 @@
-# SetSpace Backend API
+<div align="center">
 
-The SetSpace Backend API provides marketplace data and authenticated
-operations for the SetSpace studio-rental application. It is a single-file
-Express service backed by MongoDB and the Better Auth session managed by the
-frontend application.
+# ⚙️ SetSpace Backend API
 
-## Overview
+### Powering the SetSpace Creative Studio Rental Marketplace
 
-The API handles studio listings, booking requests, reviews, saved studios,
-notifications, profiles, contact messages, and newsletter subscriptions. It
-also verifies authenticated requests using the Better Auth session cookie.
+**Discover. Book. Create.**
 
-All backend implementation is currently in `index.js`.
+A RESTful API built with Node.js, Express.js, and MongoDB that manages studio listings, bookings, profiles, reviews, wishlists, notifications, and dashboards.
 
-## Implemented modules
+[![Live API](https://img.shields.io/badge/Live-API-black?style=for-the-badge&logo=vercel)](https://set-space-backend.vercel.app/)
+[![Live Website](https://img.shields.io/badge/Live-Website-black?style=for-the-badge&logo=vercel)](https://set-space-ten.vercel.app/)
+[![Frontend](https://img.shields.io/badge/Frontend-Repo-181717?style=for-the-badge&logo=github)](https://github.com/mehrabislam00/Set-Space)
 
-- Public studio listing and detail reads, plus host-owned studio management.
-- Studio photos, weekly opening-hours data, and protected host contact lookup.
-- Booking creation and authorized booking status transitions.
-- Reviews, review eligibility, and studio rating/count updates.
-- Wishlists, user notifications, and dashboard statistics.
-- User profile reads and updates, including profile image storage.
-- Public contact form and newsletter subscription endpoints.
-- MongoDB collection/index initialization and a database health check.
+</div>
 
-Booking requests and status tracking are implemented. The API does not include
-a payment gateway.
+---
 
-## Technology stack
+## 📑 Table of Contents
 
-- Node.js with ES modules
-- Express 5
-- MongoDB Node.js driver
-- `cors`
-- `dotenv`
+- [Overview](#-overview)
+- [Features](#-features)
+- [Tech Stack](#-tech-stack)
+- [Project Structure](#-project-structure)
+- [Database](#-database)
+- [Authentication](#-authentication--authorization)
+- [API Reference](#-api-reference)
+- [Response Format](#-response-format)
+- [Getting Started](#-getting-started)
+- [Environment Variables](#-environment-variables)
+- [Deployment](#-deployment)
+- [Notes & Limitations](#-notes--limitations)
+- [Related Projects](#-related-projects)
+- [License](#-license)
 
-Direct dependencies and scripts are listed in
-[`package.json`](./package.json).
+---
 
-## API reference
+## 🌟 Overview
 
-Unless noted otherwise, marketplace endpoints return JSON. New marketplace
-routes use `{ "success": true, "message": "...", "data": ... }` on success.
-Profile endpoints retain their profile-specific response shapes.
+The SetSpace Backend sits between the Next.js frontend and MongoDB. It ensures protected operations are performed only by authenticated and authorized users, and uses **Better Auth** for session-based authentication.
 
-### Service and public endpoints
+> [!NOTE]
+> The backend currently follows a **single-file architecture**: all server-side code lives in `index.js`.
 
-| Method | Endpoint | Purpose | Authentication |
+| Resource | Link |
+| --- | --- |
+| 🌐 Live Website | [set-space-ten.vercel.app](https://set-space-ten.vercel.app/) |
+| 🔌 Live Backend API | [set-space-backend.vercel.app](https://set-space-backend.vercel.app/) |
+| 💻 Frontend Repo | [mehrabislam00/Set-Space](https://github.com/mehrabislam00/Set-Space) |
+| ⚙️ Backend Repo | [mehrabislam00/set-space-backend](https://github.com/mehrabislam00/set-space-backend) |
+
+```mermaid
+flowchart LR
+    C[Next.js Frontend] -->|REST + session cookie| API[Express API<br/>index.js]
+    API -->|Forward cookie| BA[Better Auth<br/>session endpoint]
+    BA -->|Verified user| API
+    API --> DB1[(MongoDB<br/>SetSpace)]
+    BA --> DB2[(MongoDB<br/>auth)]
+```
+
+## ✨ Features
+
+<details open>
+<summary><b>🏢 Studio Management</b></summary>
+
+- Retrieve published listings and individual studio details
+- Create, update, and delete studios
+- Save as draft or publish
+- Manage photographs, weekly opening hours, and unavailable dates
+- Retrieve host contact information (with authorization)
+
+</details>
+
+<details open>
+<summary><b>📅 Booking Management</b></summary>
+
+- Create booking requests with date and time-slot validation
+- Prevent conflicting bookings
+- Retrieve renter and host bookings
+- Manage status transitions: `pending`, `confirmed`, `rejected`, `completed`, `cancelled`
+- Calculate booking totals and service fees
+
+</details>
+
+<details>
+<summary><b>👤 Profiles</b></summary>
+
+- Retrieve, create, and update profiles
+- Update and retrieve profile images
+- Clear editable profile fields
+- Account information and profile statistics
+
+</details>
+
+<details>
+<summary><b>⭐ Reviews & Ratings</b></summary>
+
+- Retrieve studio reviews
+- Check review eligibility
+- Submit reviews after eligible completed bookings
+- Update studio ratings and review counts
+- Prevent duplicate reviews for the same booking
+
+</details>
+
+<details>
+<summary><b>❤️ Wishlists & 🔔 Notifications</b></summary>
+
+- Save, list, and remove wishlist studios (per user)
+- List notifications, mark one or all as read, and delete
+
+</details>
+
+<details>
+<summary><b>📊 Dashboard Statistics</b></summary>
+
+For both renter and host dashboards: total and upcoming bookings, studio listings, pending requests, earnings, monthly earnings, and wishlist stats.
+
+</details>
+
+<details>
+<summary><b>🧰 Additional Services</b></summary>
+
+- Contact form message storage
+- Newsletter subscription management
+- Automatic collection and index initialization
+- Database connectivity (health) checks
+
+</details>
+
+## 🧰 Tech Stack
+
+| Technology | Purpose |
+| --- | --- |
+| **Node.js** | JavaScript runtime |
+| **Express.js 5** | Backend framework |
+| **MongoDB** + Node.js Driver | Database and operations |
+| **Better Auth** | Authentication and session verification |
+| **CORS** | Cross-origin request handling |
+| **dotenv** | Environment configuration |
+| **@xmldom/xmldom** | XML parsing and serialization |
+| **Vercel** | Deployment |
+
+## 📂 Project Structure
+
+```text
+set-space-backend/
+├── index.js            # Express server, middleware, DB init, auth helpers, routes
+├── package.json        # Dependencies and scripts
+├── package-lock.json   # Locked dependency versions
+├── vercel.json         # Vercel deployment configuration
+└── README.md
+```
+
+`index.js` contains the Express config, environment handling, CORS, request parsing, MongoDB connection and initialization, authentication and authorization helpers, index management, all route handlers, and error handling.
+
+## 🗄 Database
+
+One MongoDB cluster, two databases:
+
+| Database | Responsibility |
+| --- | --- |
+| `auth` | Better Auth users, sessions, accounts, verification records |
+| `SetSpace` | Marketplace application data |
+
+**`SetSpace` collections**
+
+| Collection | Description |
+| --- | --- |
+| `userProfiles` | User profile information |
+| `studios` | Studio listings and details |
+| `bookings` | Booking records |
+| `reviews` | Studio reviews and ratings |
+| `wishlists` | Saved studios |
+| `notifications` | User notifications |
+| `contactMessages` | Contact form submissions |
+| `newsletterSubscribers` | Newsletter subscriptions |
+
+Better Auth manages its own collections in the lowercase `auth` database. The backend reads the necessary user records but **never modifies** Better Auth's data. Application collections and indexes are created automatically on connect.
+
+## 🔐 Authentication & Authorization
+
+Authentication is handled by the Next.js frontend. The Express backend independently verifies session cookies before allowing protected operations.
+
+```mermaid
+sequenceDiagram
+    participant U as Browser
+    participant F as Next.js (Better Auth)
+    participant B as Express API
+    U->>F: Sign in
+    F-->>U: Session cookie
+    U->>B: API request + cookie
+    B->>F: Forward cookie to session endpoint
+    F-->>B: Verified user
+    B-->>U: Authorized response
+```
+
+**Security considerations**
+
+- Protected endpoints require a valid session
+- User identity comes from the verified session, never from request-body user IDs
+- Studio ownership is validated before host-specific changes
+- Booking, profile, and wishlist operations are user-specific
+- CORS restricts requests to configured frontend origins
+- Request data is validated before database operations
+
+## 📚 API Reference
+
+**Base URL**
+
+| Environment | URL |
+| --- | --- |
+| Production | `https://set-space-backend.vercel.app` |
+| Local | `http://localhost:5000` |
+
+### Service & Public
+
+| Method | Endpoint | Description | Access |
 | --- | --- | --- | --- |
-| `GET` | `/` | Basic service response (`Hello World!`). | Public |
-| `GET` | `/api/health` | Checks both databases and required application collections. | Public |
-| `GET` | `/api/studios` | Lists published/active studios. | Public |
-| `GET` | `/api/studios/:id` | Reads a published/active studio. | Public |
-| `GET` | `/api/studios/:id/photos/:index` | Serves a stored studio photo. Private listing photos are restricted to the owner. | Conditional |
-| `GET` | `/api/reviews?studioId=:id` | Lists reviews, optionally filtered by studio. | Public |
-| `POST` | `/api/contact` | Saves a contact message. | Public |
-| `POST` | `/api/newsletter` | Subscribes an email address. | Public |
+| `GET` | `/` | Check API availability | Public |
+| `GET` | `/api/health` | Check database health | Public |
+| `GET` | `/api/studios` | List published studios | Public |
+| `GET` | `/api/studios/:id` | Studio details | Public |
+| `GET` | `/api/studios/:id/photos/:index` | Studio photograph | Conditional |
+| `GET` | `/api/reviews?studioId=:id` | Studio reviews | Public |
+| `POST` | `/api/contact` | Submit contact message | Public |
+| `POST` | `/api/newsletter` | Subscribe to newsletter | Public |
 
-### Studios
+### Studios 🔒
 
-| Method | Endpoint | Purpose |
+*Require authentication and enforce ownership where applicable.*
+
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/api/studios/mine` | Lists the signed-in host's studios, including drafts. |
-| `GET` | `/api/studios/mine/:id` | Reads one studio owned by the signed-in host. |
-| `POST` | `/api/studios` | Creates a studio. Accepts `details` and a `draft` or `published` status. |
-| `PATCH` | `/api/studios/:id` | Updates an owned studio. |
-| `PATCH` | `/api/studios/:id/status` | Changes an owned studio's `draft`/`published` status. |
-| `DELETE` | `/api/studios/:id` | Deletes an owned studio. |
-| `GET` | `/api/studios/:id/contact` | Returns the host phone number for a published studio. |
+| `GET` | `/api/studios/mine` | List host-owned studios |
+| `GET` | `/api/studios/mine/:id` | Get an owned studio |
+| `POST` | `/api/studios` | Create a studio |
+| `PATCH` | `/api/studios/:id` | Update a studio |
+| `PATCH` | `/api/studios/:id/status` | Update publication status |
+| `DELETE` | `/api/studios/:id` | Delete a studio |
+| `GET` | `/api/studios/:id/contact` | Get host contact details |
 
-All routes in this section require a valid session and enforce studio
-ownership where applicable.
+### Bookings 🔒
 
-### Bookings
-
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/api/bookings?role=renter\|host` | Lists the signed-in user's bookings; `role` is optional. |
-| `POST` | `/api/bookings` | Creates a booking request for a published studio. |
-| `PATCH` | `/api/bookings/:id/status` | Applies an authorized booking status transition. |
+| `GET` | `/api/bookings?role=renter` | Renter bookings |
+| `GET` | `/api/bookings?role=host` | Host bookings |
+| `POST` | `/api/bookings` | Create a booking request |
+| `PATCH` | `/api/bookings/:id/status` | Update booking status |
 
-Example request:
+<details>
+<summary>Example: create a booking</summary>
 
 ```json
 {
@@ -92,175 +262,193 @@ Example request:
 }
 ```
 
-The server determines the renter from the verified session and validates
-availability and booking conflicts.
+The renter is determined from the verified session. The backend validates availability and conflicts.
 
-### Reviews
+</details>
 
-| Method | Endpoint | Purpose |
+### Reviews 🔒
+
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/api/reviews/eligibility?studioId=:id` | Checks whether the signed-in renter can review a completed booking. |
-| `POST` | `/api/reviews` | Submits a review for an eligible completed booking. |
+| `GET` | `/api/reviews` | Retrieve reviews |
+| `GET` | `/api/reviews/eligibility?studioId=:id` | Check review eligibility |
+| `POST` | `/api/reviews` | Submit a review (requires eligible completed booking) |
 
-Review creation requires a completed, ended booking associated with the
-session user. The studio rating and review count are updated with the review.
+### Wishlists 🔒
 
-### Wishlists, statistics, and notifications
-
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/api/stats` | Returns renter and host dashboard statistics. |
-| `GET` | `/api/wishlists` | Lists the signed-in user's saved published studios. |
-| `POST` | `/api/wishlists` | Saves a published studio. |
-| `DELETE` | `/api/wishlists/:studioId` | Removes a studio from the wishlist. |
-| `GET` | `/api/notifications` | Lists the signed-in user's notifications. |
-| `PATCH` | `/api/notifications/read-all` | Marks all notifications as read. |
-| `PATCH` | `/api/notifications/:id/read` | Marks one notification as read. |
-| `DELETE` | `/api/notifications/:id` | Deletes one notification. |
+| `GET` | `/api/wishlists` | List saved studios |
+| `POST` | `/api/wishlists` | Add a studio |
+| `DELETE` | `/api/wishlists/:studioId` | Remove a studio |
 
-### Profiles and user account
+### Notifications 🔒
 
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/api/profile` | Reads the signed-in user's profile, Better Auth user, and profile stats. |
-| `POST` | `/api/profile` | Creates the profile if one does not already exist. |
-| `PATCH` / `PUT` | `/api/profile` | Updates the signed-in user's profile. |
-| `DELETE` | `/api/profile` | Deletes the SetSpace profile document. |
-| `DELETE` | `/api/profile/fields/:field` | Clears an allowed editable profile field. |
-| `GET` | `/api/profile/image` | Serves the signed-in user's profile image. |
-| `PUT` | `/api/profile/image` | Saves a supported raw image upload. |
-| `GET` | `/users/:id` | Reads the signed-in user's Better Auth account; `/users/me` is supported. |
+| `GET` | `/api/notifications` | List notifications |
+| `PATCH` | `/api/notifications/read-all` | Mark all as read |
+| `PATCH` | `/api/notifications/:id/read` | Mark one as read |
+| `DELETE` | `/api/notifications/:id` | Delete a notification |
 
-Profile endpoints use their established response shape, such as
-`{ "profile": ..., "user": ..., "stats": ... }`; profile errors include
-`error` and `code`. The server derives user identity from the session rather
-than trusting a request-body user ID.
+### Profile & Users 🔒
 
-Unknown routes return `404` with a JSON error response.
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/api/profile` | Get profile and statistics |
+| `POST` | `/api/profile` | Create profile |
+| `PATCH` / `PUT` | `/api/profile` | Update profile |
+| `DELETE` | `/api/profile` | Delete application profile |
+| `DELETE` | `/api/profile/fields/:field` | Clear an editable field |
+| `GET` | `/api/profile/image` | Get profile image |
+| `PUT` | `/api/profile/image` | Upload or update profile image |
+| `GET` | `/users/:id` | Get authenticated user account |
+| `GET` | `/users/me` | Get current user |
 
-## Authentication and authorization
+> [!NOTE]
+> Profile image uploads send **raw image data**, not a JSON body.
 
-The frontend runs Better Auth at `/api/auth/*`. For protected API requests,
-the backend forwards the incoming session cookie to the Better Auth
-`/api/auth/get-session` endpoint and uses the returned user ID for
-authorization. The frontend and backend must agree on the Better Auth base
-URL and use the same session/auth database.
+## 📨 Response Format
 
-Protected routes validate ownership for studio, booking, profile, wishlist,
-and notification operations. Public studio and review reads do not require a
-session; host contact lookup and mutations do.
+Most marketplace endpoints share one JSON structure:
 
-## MongoDB architecture
+```json
+// Success
+{
+  "success": true,
+  "message": "Request completed successfully",
+  "data": {}
+}
 
-Both applications use the same MongoDB cluster, with separate databases for
-authentication and marketplace data:
-
-| Database | Owner and contents |
-| --- | --- |
-| `auth` (lowercase) | Better Auth owns `user`, `session`, `account`, and `verification`. The API reads the user collection for account responses and does not modify Better Auth records. |
-| `SetSpace` | Marketplace collections: `userProfiles`, `studios`, `bookings`, `reviews`, `wishlists`, `notifications`, `contactMessages`, and `newsletterSubscribers`. |
-
-The database is named `auth` in the current frontend auth configuration.
-Although it may be referred to conceptually as the Auth database, it is
-lowercase in MongoDB; changing it independently would disconnect the API from
-Better Auth. The backend ensures the application collections and indexes
-exist at startup.
-
-## Repository structure
-
-```text
-index.js          Express app, MongoDB setup, middleware, helpers, and routes
-package.json      Dependencies and npm scripts
-package-lock.json Locked dependency versions
-.gitignore        Ignores local dependencies and environment configuration
+// Error
+{
+  "success": false,
+  "message": "Something went wrong"
+}
 ```
 
-## Environment variables
+Profile endpoints use their own dedicated response and error formats.
 
-Create a `.env` file in the backend repository root. Never commit credentials.
+## ⚡ Getting Started
 
-```dotenv
-PORT=5000
-MONGODB_USERNAME=YOUR_MONGODB_USERNAME
-MONGODB_PASSWORD=YOUR_MONGODB_PASSWORD
+### Prerequisites
 
-# Comma-separated frontend origins allowed by CORS
-CLIENT_URI=http://localhost:3000,https://set-space-five.vercel.app
+- Node.js and npm
+- Git
+- A MongoDB Atlas account
+- Access to the SetSpace frontend authentication service
 
-# Base URL of the Next.js app running Better Auth
-BETTER_AUTH_URL=http://localhost:3000
-
-# Defaults shown for clarity; keep AUTH_DB_NAME aligned with the frontend.
-AUTH_DB_NAME=auth
-SETSPACE_DB_NAME=SetSpace
-
-# Optional fallback for resolving the Better Auth base URL when
-# BETTER_AUTH_URL is not set.
-# AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
-```
-
-`MONGODB_USERNAME` and `MONGODB_PASSWORD` are used for the current Atlas
-cluster. `MONGODB_URI` is used as a fallback when credentials are not set. The current backend
-constructs its MongoDB connection from these credentials; it does not read a
-`MONGODB_URI` variable. `PORT`, `CLIENT_URI`, `BETTER_AUTH_URL`,
-`AUTH_DB_NAME`, and `SETSPACE_DB_NAME` have code defaults. If changing
-`AUTH_DB_NAME`, update the frontend Better Auth database configuration too.
-
-## Installation and local development
+### Setup
 
 ```bash
+git clone https://github.com/mehrabislam00/set-space-backend.git
+cd set-space-backend
 npm install
+```
+
+Create a `.env` file (see below), then:
+
+```bash
 npm run dev
 ```
 
-The development script runs `node --watch index.js`. The API listens on port
-`5000` by default and requires network access to MongoDB and the configured
-Next.js Better Auth endpoint.
+The server runs in Node.js watch mode at **http://localhost:5000**.
 
-## API usage
+### Verify
 
-Public studio listing:
+| Check | URL |
+| --- | --- |
+| Service response | `http://localhost:5000/` |
+| Database connectivity | `http://localhost:5000/api/health` |
 
-```bash
-curl http://localhost:5000/api/studios
+### Scripts
+
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start with Node.js watch mode |
+| `node index.js` | Run the server directly |
+
+## 🔑 Environment Variables
+
+| Variable | Required | Description |
+| --- | :---: | --- |
+| `PORT` | ➖ | Server port (e.g. `5000`) |
+| `MONGODB_URI` | ✅* | Full MongoDB connection string |
+| `MONGODB_USERNAME` | ✅* | MongoDB username |
+| `MONGODB_PASSWORD` | ✅* | MongoDB password |
+| `AUTH_DB_NAME` | ✅ | Better Auth database name (`auth`) |
+| `SETSPACE_DB_NAME` | ✅ | Application database name (`SetSpace`) |
+| `CLIENT_URI` | ✅ | Comma-separated allowed frontend origins |
+| `BETTER_AUTH_URL` | ✅ | Frontend URL hosting Better Auth |
+| `AUTH_JWKS_URL` | ➖ | Optional Better Auth JWKS URL fallback |
+
+\* Provide either `MONGODB_URI`, **or** both `MONGODB_USERNAME` and `MONGODB_PASSWORD`. If both are provided, the credential pair takes priority.
+
+```env
+PORT=5000
+
+# Either this...
+MONGODB_URI=your_mongodb_connection_string
+# ...or this pair
+# MONGODB_USERNAME=your_mongodb_username
+# MONGODB_PASSWORD=your_mongodb_password
+
+AUTH_DB_NAME=auth
+SETSPACE_DB_NAME=SetSpace
+
+CLIENT_URI=http://localhost:3000,https://set-space-ten.vercel.app
+BETTER_AUTH_URL=http://localhost:3000
+AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
 ```
 
-Health check:
+> [!IMPORTANT]
+> - Keep `AUTH_DB_NAME` as `auth` unless you also update the frontend's Better Auth configuration.
+> - Set `CLIENT_URI` to the **exact** frontend origins you want to allow.
+> - Replace localhost URLs with deployed URLs in production.
+> - **Never commit `.env`** to GitHub.
 
-```bash
-curl http://localhost:5000/api/health
-```
+## ☁️ Deployment
 
-Authenticated requests must include the Better Auth session cookie issued by
-the frontend. For browser requests, configure the frontend API base URL and
-allow its origin through `CLIENT_URI`.
+Deployed on **Vercel** at [set-space-backend.vercel.app](https://set-space-backend.vercel.app/).
 
-## Production deployment
+1. Import the backend repository into Vercel.
+2. Add the MongoDB credentials as environment variables.
+3. Set `AUTH_DB_NAME=auth` and `SETSPACE_DB_NAME=SetSpace`.
+4. Set `CLIENT_URI` to the production frontend origin.
+5. Set `BETTER_AUTH_URL` to the production frontend URL.
+6. Make sure MongoDB Atlas allows connections from the deployed backend.
+7. Deploy and verify `/api/health`.
 
-Run the service with:
+> [!IMPORTANT]
+> Frontend and backend must use a compatible Better Auth configuration and the same authentication database. The frontend's `NEXT_PUBLIC_API_URL` must point to this deployed API.
 
-```bash
-node index.js
-```
+## 📌 Notes & Limitations
 
-Configure the deployment environment with MongoDB credentials, the platform's
-`PORT`, the production frontend origin(s) in `CLIENT_URI`, and the frontend
-Better Auth base URL in `BETTER_AUTH_URL`. For this deployment, set
-`CLIENT_URI` to `https://set-space-five.vercel.app` and `BETTER_AUTH_URL` to
-the same URL. Ensure the API can reach both MongoDB and the deployed Next.js
-authentication endpoint. Configure the frontend's `NEXT_PUBLIC_API_URL` to
-the deployed API base URL and use HTTPS origins in production.
+- Single-file architecture (`index.js`)
+- Booking requests and status management are implemented
+- Online payment gateway integration is **not** included
+- Better Auth authentication is managed by the frontend
+- Automated test coverage is not yet configured
 
-No automated test suite is configured yet; the `test` script in
-`package.json` is a placeholder.
+## 🔗 Related Projects
 
-## Project links
+| Project | Link |
+| --- | --- |
+| SetSpace Frontend | [GitHub](https://github.com/mehrabislam00/Set-Space) |
+| SetSpace Backend | [GitHub](https://github.com/mehrabislam00/set-space-backend) |
+| Live Application | [set-space-ten.vercel.app](https://set-space-ten.vercel.app/) |
+| Live Backend API | [set-space-backend.vercel.app](https://set-space-backend.vercel.app/) |
 
-- Backend Repository: `YOUR_BACKEND_GITHUB_REPOSITORY_URL`
-- Frontend Repository: `YOUR_FRONTEND_GITHUB_REPOSITORY_URL`
-- Live Backend API: `YOUR_LIVE_BACKEND_API_URL`
+## 📄 License
 
-## License
+Distributed under the **ISC License**, as declared in `package.json`.
 
-The backend `package.json` declares the ISC license. This repository does not
-currently include a separate `LICENSE` file.
+---
+
+<div align="center">
+
+**SetSpace — Create. Rent. Inspire.**
+
+Built to connect creative people with creative spaces.
+
+</div>
