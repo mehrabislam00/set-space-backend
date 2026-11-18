@@ -1714,60 +1714,6 @@ app.get(
   }, 'Failed to load host onboarding status'),
 );
 
-app.patch(
-  '/api/host/onboarding/progress',
-  requireSession,
-  withApiErrorHandling(async (req, res) => {
-    const step = req.body?.step;
-    if (!Number.isInteger(step) || step < 0 || step >= 8) {
-      return sendError(res, 400, 'The host onboarding step is invalid');
-    }
-
-    const state = await getHostOnboardingState(req.userId);
-    if (step > state.currentStep + 1) {
-      return sendError(res, 409, 'Complete the previous step first');
-    }
-    if (step > 1 && !state.profileComplete) {
-      return sendError(
-        res,
-        400,
-        `Enter a full name of ${PROFILE_LIMITS.name} characters or fewer in your profile before continuing`,
-      );
-    }
-
-    const now = new Date();
-    const update = {
-      $set: {
-        email: cleanText(req.authUser.email),
-        hostOnboardingStep: step,
-        updatedAt: now,
-      },
-      $setOnInsert: {
-        userId: req.userId,
-        createdAt: now,
-      },
-    };
-
-    try {
-      await userProfiles.updateOne({ userId: req.userId }, update, {
-        upsert: true,
-      });
-    } catch (error) {
-      if (error?.code !== 11000) throw error;
-      await userProfiles.updateOne(
-        { userId: req.userId },
-        { $set: update.$set },
-      );
-    }
-
-    const data = await getHostOnboardingState(req.userId);
-    return sendSuccess(res, {
-      message: 'Host onboarding progress saved',
-      data,
-    });
-  }, 'Failed to save host onboarding progress'),
-);
-
 app.post(
   '/api/host/onboarding/complete',
   requireSession,
@@ -1788,17 +1734,10 @@ app.post(
         `Enter a full name of ${PROFILE_LIMITS.name} characters or fewer in your profile before starting to host`,
       );
     }
-    if (state.currentStep < 7) {
-      return sendError(res, 409, 'Complete each hosting journey step first');
-    }
 
     const now = new Date();
     const update = {
-      $set: {
-        hostOnboardingCompleted: true,
-        hostOnboardingStep: 7,
-        updatedAt: now,
-      },
+      $set: { hostOnboardingCompleted: true, updatedAt: now },
       $setOnInsert: {
         userId: req.userId,
         name: cleanText(req.authUser.name),
@@ -1813,13 +1752,7 @@ app.post(
       if (error?.code !== 11000) throw error;
       await userProfiles.updateOne(
         { userId: req.userId },
-        {
-          $set: {
-            hostOnboardingCompleted: true,
-            hostOnboardingStep: 7,
-            updatedAt: now,
-          },
-        },
+        { $set: { hostOnboardingCompleted: true, updatedAt: now } },
       );
     }
 
@@ -3288,3 +3221,5 @@ app.listen(port, () => {
     `Profile storage: ${SETSPACE_DB_NAME}.${USER_PROFILES_COLLECTION} (auth data stays in ${AUTH_DB_NAME})`,
   );
 });
+
+export default app;
