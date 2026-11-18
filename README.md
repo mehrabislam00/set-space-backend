@@ -45,7 +45,6 @@ The SetSpace Backend sits between the Next.js frontend and MongoDB. It ensures p
 | Resource | Link |
 | --- | --- |
 | 🌐 Live Website | [set-space-ten.vercel.app](https://set-space-ten.vercel.app/) |
-| 🔌 Live Backend API | [set-space-backend.vercel.app](https://set-space-backend.vercel.app/) |
 | 💻 Frontend Repo | [mehrabislam00/Set-Space](https://github.com/mehrabislam00/Set-Space) |
 | ⚙️ Backend Repo | [mehrabislam00/set-space-backend](https://github.com/mehrabislam00/set-space-backend) |
 
