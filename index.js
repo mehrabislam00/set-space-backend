@@ -1764,6 +1764,53 @@ app.get(
   }, 'Failed to load host onboarding status'),
 );
 
+app.patch(
+  '/api/host/onboarding/progress',
+  requireSession,
+  withApiErrorHandling(async (req, res) => {
+    const step = req.body?.step;
+    if (!Number.isInteger(step) || step < 0 || step > 7) {
+      return sendError(res, 400, 'Hosting journey step is invalid');
+    }
+
+    const state = await getHostOnboardingState(req.userId);
+    if (step > state.currentStep + 1) {
+      return sendError(res, 400, 'Complete the previous hosting step first');
+    }
+    if (step > 1 && !state.profileComplete) {
+      return sendError(
+        res,
+        400,
+        `Enter a full name of ${PROFILE_LIMITS.name} characters or fewer in your profile before continuing`,
+      );
+    }
+
+    const now = new Date();
+    const update = {
+      $set: { hostOnboardingStep: step, updatedAt: now },
+      $setOnInsert: {
+        userId: req.userId,
+        name: cleanText(req.authUser.name),
+        email: cleanText(req.authUser.email),
+        createdAt: now,
+      },
+    };
+
+    try {
+      await userProfiles.updateOne({ userId: req.userId }, update, { upsert: true });
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      await userProfiles.updateOne(
+        { userId: req.userId },
+        { $set: { hostOnboardingStep: step, updatedAt: now } },
+      );
+    }
+
+    const data = await getHostOnboardingState(req.userId);
+    return sendSuccess(res, { message: 'Hosting journey progress saved', data });
+  }, 'Failed to update host onboarding progress'),
+);
+
 app.post(
   '/api/host/onboarding/complete',
   requireSession,
